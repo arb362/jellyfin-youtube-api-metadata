@@ -11,7 +11,7 @@
                 "version": "0.3.0.0",
                 "changelog": "Channel-name search: series folders without a [channelId] are resolved by name or @handle (exact match preferred, result cached), and the Identify dialog returns full channel details. Video files without a [videoId] are matched by title within their channel. Series now get keywords as tags, topic categories as genres, country, home page URL, and the channel banner as backdrop/banner images; episodes get topic categories as genres. New settings to toggle the name/title lookups and the Identify result count.\n",
                 "targetAbi": "12.0.0",
-                "sourceUrl": "https://raw.githubusercontent.com/OWNER/REPO/main/releases/youtube-api-metadata_0.3.0.0.zip",
+                "sourceUrl": "https://raw.githubusercontent.com/arb362/jellyfin-youtube-api-metadata/main/releases/youtube-api-metadata_0.3.0.0.zip",
                 "checksum": "c277088a4c5b8966ed5fbee62d50af70",
                 "timestamp": "2026-09-30T23:04:49Z"
             },

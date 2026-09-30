@@ -1,6 +1,6 @@
 # YouTube API Metadata (Jellyfin plugin)
 
-![Build and Test Plugin](https://github.com/OWNER/REPO/actions/workflows/build.yml/badge.svg)
+![Build and Test Plugin](https://github.com/arb362/jellyfin-youtube-api-metadata/actions/workflows/build.yml/badge.svg)
 
 > [!CAUTION]
 > This plugin does **not** download YouTube videos. It only fetches metadata (title, description, thumbnails...) for videos you already have on disk. Use [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) (or similar) to download the videos themselves.
@@ -81,7 +81,7 @@ Channel folders can be named `<Channel Name>`, `@<handle>`, or `<Channel Name> [
 Dashboard → Plugins → Repositories → Add:
 
 ```
-https://raw.githubusercontent.com/OWNER/REPO/main/manifest.json
+https://raw.githubusercontent.com/arb362/jellyfin-youtube-api-metadata/main/manifest.json
 ```
 
 Then install "YouTube API Metadata" from Dashboard → Plugins → Catalog and restart Jellyfin.
