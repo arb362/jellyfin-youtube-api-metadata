@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Google.Apis.YouTube.v3.Data;
@@ -32,7 +34,38 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Caching
         public Task SaveChannelAsync(string channelId, Channel channel, CancellationToken cancellationToken)
             => WriteAsync(GetPath(channelId, "channel.json"), channel, cancellationToken);
 
+        public async Task<string?> GetChannelIdForNameAsync(string normalizedName, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(normalizedName))
+            {
+                return null;
+            }
+
+            var entry = await ReadAsync<ChannelNameEntry>(GetNamePath(normalizedName), cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrEmpty(entry?.ChannelId) ? null : entry!.ChannelId;
+        }
+
+        public Task SaveChannelIdForNameAsync(string normalizedName, string channelId, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(normalizedName) || string.IsNullOrEmpty(channelId))
+            {
+                return Task.CompletedTask;
+            }
+
+            return WriteAsync(GetNamePath(normalizedName), new ChannelNameEntry { Name = normalizedName, ChannelId = channelId }, cancellationToken);
+        }
+
         private string GetPath(string id, string fileName) => Path.Combine(_cacheRoot, id, fileName);
+
+        /// <summary>
+        /// Channel names can contain anything (slashes, unicode, trailing dots...), so the file is
+        /// keyed by a hash of the normalized name rather than the name itself.
+        /// </summary>
+        private string GetNamePath(string normalizedName)
+        {
+            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalizedName)));
+            return Path.Combine(_cacheRoot, Constants.ChannelNameCacheDirectoryName, hash + ".json");
+        }
 
         private async Task<T?> ReadAsync<T>(string path, CancellationToken cancellationToken)
             where T : class
@@ -63,6 +96,17 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Caching
 
             var json = JsonConvert.SerializeObject(value);
             await File.WriteAllTextAsync(path, json, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// On-disk shape of a channel-name → channel-ID lookup. The name is stored too so the cache
+        /// folder stays human-readable when debugging.
+        /// </summary>
+        private sealed class ChannelNameEntry
+        {
+            public string? Name { get; set; }
+
+            public string? ChannelId { get; set; }
         }
     }
 }

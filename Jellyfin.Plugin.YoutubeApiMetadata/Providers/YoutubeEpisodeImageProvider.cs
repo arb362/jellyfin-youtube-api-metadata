@@ -12,7 +12,9 @@ using MediaBrowser.Model.Providers;
 namespace Jellyfin.Plugin.YoutubeApiMetadata.Providers
 {
     /// <summary>
-    /// Supplies the video thumbnail as the Primary image for an Episode.
+    /// Supplies the video thumbnail as the Primary image for an Episode. The video is located by
+    /// its stored provider ID first (set by the metadata provider, including when it was resolved
+    /// through a title search), then by the "[videoId]" in the file name.
     /// </summary>
     public class YoutubeEpisodeImageProvider : IRemoteImageProvider, IHasOrder
     {
@@ -36,14 +38,17 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Providers
 
         public async Task<IEnumerable<RemoteImageInfo>> GetImages(BaseItem item, CancellationToken cancellationToken)
         {
-            var videoId = Utils.GetYTID(item.Path ?? string.Empty);
+            var videoId = item.ProviderIds.TryGetValue(Constants.PluginName, out var stored) && !string.IsNullOrEmpty(stored)
+                ? stored
+                : Utils.GetVideoId(Utils.GetLastPathSegment(item.Path ?? string.Empty));
+
             if (string.IsNullOrEmpty(videoId))
             {
                 return System.Array.Empty<RemoteImageInfo>();
             }
 
             var video = await _resolver.GetVideoAsync(videoId, cancellationToken).ConfigureAwait(false);
-            var url = video == null ? null : Utils.GetBestThumbnailUrl(video.Snippet.Thumbnails);
+            var url = video == null ? null : Utils.GetBestThumbnailUrl(video.Snippet?.Thumbnails);
             if (string.IsNullOrEmpty(url))
             {
                 return System.Array.Empty<RemoteImageInfo>();

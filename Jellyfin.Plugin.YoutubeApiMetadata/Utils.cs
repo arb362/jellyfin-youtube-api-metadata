@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
 using Google.Apis.YouTube.v3.Data;
@@ -8,6 +11,7 @@ using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.Providers;
 using YTVideo = Google.Apis.YouTube.v3.Data.Video;
 
 namespace Jellyfin.Plugin.YoutubeApiMetadata
@@ -15,19 +19,114 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
     public static class Utils
     {
         /// <summary>
+        /// yt-dlp's recommended layout puts the upload date first: "20190113 - Title [id].mkv" or
+        /// "2019-01-13 - Title.mkv". Some templates also prefix the channel: "Channel - 20190113 - Title".
+        /// </summary>
+        private static readonly Regex DatePrefixRegex = new(
+            @"^(?:(?<channel>[^\[\]]+?)\s+-\s+)?(?<date>(?<y>\d{4})-?(?<m>\d{2})-?(?<d>\d{2}))\s*-\s*",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static readonly Regex BracketedIdRegex = new(
+            @"\s*\[[a-zA-Z0-9\-_]{11}\]|\s*\[[a-zA-Z0-9\-_]{24}\]",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static readonly Regex NonAlphanumericRegex = new(
+            @"[^\p{L}\p{Nd}]+",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static readonly Regex HandleRegex = new(
+            Constants.YTHANDLE_RE,
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static readonly Regex TrailingParentheticalRegex = new(
+            @"\s*\([^)]*\)\s*$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        /// <summary>
         /// Extracts a YouTube video ID (11 chars) or channel ID (24 chars) from a file name,
         /// expected between square brackets, e.g. "Some Video [dQw4w9WgXcQ].mkv".
         /// </summary>
         public static string GetYTID(string name)
         {
-            var videoMatch = Regex.Match(name, Constants.YTID_RE);
-            if (videoMatch.Success)
+            var videoId = GetVideoId(name);
+            return videoId.Length > 0 ? videoId : GetChannelId(name);
+        }
+
+        /// <summary>
+        /// Extracts only a bracketed 11-char video ID from text, or "" if there is none. Use this
+        /// (on the file name alone) for episodes, so a "[channelId]" in the parent folder is never
+        /// mistaken for the video's ID.
+        /// </summary>
+        public static string GetVideoId(string name)
+        {
+            var match = Regex.Match(name, Constants.YTID_RE);
+            return match.Success ? match.Value : string.Empty;
+        }
+
+        /// <summary>
+        /// Extracts only a bracketed 24-char channel ID from text, or "" if there is none.
+        /// </summary>
+        public static string GetChannelId(string name)
+        {
+            var match = Regex.Match(name, Constants.YTCHANNEL_RE);
+            return match.Success ? match.Value : string.Empty;
+        }
+
+        /// <summary>
+        /// The last segment of a path, treating both "/" and "\" as separators regardless of the
+        /// host OS (library paths can come from a differently-hosted Jellyfin or a network share).
+        /// </summary>
+        public static string GetLastPathSegment(string path)
+        {
+            var trimmed = path.TrimEnd('/', '\\');
+            var index = trimmed.LastIndexOfAny(new[] { '/', '\\' });
+            return index < 0 ? trimmed : trimmed[(index + 1)..];
+        }
+
+        /// <summary>
+        /// The path minus its last segment (the parent directory), separator-agnostic like
+        /// <see cref="GetLastPathSegment"/>. Null when there is no parent.
+        /// </summary>
+        public static string? GetParentPath(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
             {
-                return videoMatch.Value;
+                return null;
             }
 
-            var channelMatch = Regex.Match(name, Constants.YTCHANNEL_RE);
-            return channelMatch.Success ? channelMatch.Value : string.Empty;
+            var trimmed = path.TrimEnd('/', '\\');
+            var index = trimmed.LastIndexOfAny(new[] { '/', '\\' });
+            return index <= 0 ? null : trimmed[..index];
+        }
+
+        /// <summary>
+        /// True when the text is a YouTube handle ("@rickastley"): the API can resolve those with an
+        /// exact 1-unit lookup instead of a 100-unit search.
+        /// </summary>
+        public static bool IsHandle(string? text)
+        {
+            return !string.IsNullOrWhiteSpace(text) && HandleRegex.IsMatch(text.Trim());
+        }
+
+        /// <summary>
+        /// Canonical form of a channel/video name for comparisons and cache keys: lower-cased,
+        /// with every run of punctuation/whitespace collapsed to a single space. Also strips a
+        /// leading "@" so a handle and the same text without it normalize identically.
+        /// </summary>
+        public static string NormalizeName(string? name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return string.Empty;
+            }
+
+            var trimmed = name.Trim();
+            if (trimmed.StartsWith('@'))
+            {
+                trimmed = trimmed[1..];
+            }
+
+            return NonAlphanumericRegex.Replace(trimmed, " ").Trim().ToLowerInvariant();
         }
 
         /// <summary>
@@ -48,23 +147,240 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
         }
 
         /// <summary>
+        /// The channel's banner artwork (brandingSettings.image.bannerExternalUrl) rendered at a
+        /// given size, or null if the channel has no banner. The bare URL returns the raw upload;
+        /// the suffix asks YouTube's image server for a specific width and crop.
+        /// </summary>
+        public static string? GetBannerUrl(Channel? channel, string sizeSuffix)
+        {
+            var url = channel?.BrandingSettings?.Image?.BannerExternalUrl;
+            return string.IsNullOrEmpty(url) ? null : url + sizeSuffix;
+        }
+
+        /// <summary>
         /// Resolves a channel ID from (in order): an already-stored provider ID, the folder name
         /// convention "[channelId]", or (last resort) a bracketed ID in the series display name.
         /// </summary>
-        public static string? ResolveChannelId(IReadOnlyDictionary<string, string> providerIds, string? path, string? name)
+        public static string? ResolveChannelId(IReadOnlyDictionary<string, string>? providerIds, string? path, string? name)
         {
             if (providerIds != null && providerIds.TryGetValue(Constants.PluginName, out var id) && !string.IsNullOrEmpty(id))
             {
                 return id;
             }
 
-            var fromPath = GetYTID(path ?? string.Empty);
+            var fromPath = GetChannelId(GetLastPathSegment(path ?? string.Empty));
             if (!string.IsNullOrEmpty(fromPath))
             {
                 return fromPath;
             }
 
-            return !string.IsNullOrEmpty(name) ? GetYTID(name) : null;
+            var fromName = string.IsNullOrEmpty(name) ? string.Empty : GetChannelId(name);
+            return fromName.Length > 0 ? fromName : null;
+        }
+
+        /// <summary>
+        /// The channel name a series folder was given, with any "[channelId]" suffix removed:
+        /// "/media/Rick Astley [UCuAXFkgsw1L7xaCfnd5JJOw]" → "Rick Astley". For an episode path,
+        /// pass its parent directory.
+        /// </summary>
+        public static string? GetChannelNameFromPath(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return null;
+            }
+
+            var folder = GetLastPathSegment(path);
+            var name = BracketedIdRegex.Replace(folder, string.Empty).Trim();
+            return string.IsNullOrEmpty(name) ? null : name;
+        }
+
+        /// <summary>
+        /// Splits a video file name into the pieces needed to find it on YouTube without an ID:
+        /// the title (extension, bracketed IDs and yt-dlp's "YYYYMMDD - " prefix removed) and the
+        /// upload date when the name carries one.
+        /// </summary>
+        public static (string Title, DateTime? UploadDate) ParseEpisodeFileName(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return (string.Empty, null);
+            }
+
+            var name = Path.GetFileNameWithoutExtension(GetLastPathSegment(path));
+            name = BracketedIdRegex.Replace(name, string.Empty);
+
+            DateTime? uploadDate = null;
+            var match = DatePrefixRegex.Match(name);
+            if (match.Success)
+            {
+                if (DateTime.TryParseExact(
+                        match.Groups["y"].Value + match.Groups["m"].Value + match.Groups["d"].Value,
+                        "yyyyMMdd",
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                        out var parsed))
+                {
+                    uploadDate = parsed;
+                    name = name[match.Length..];
+                }
+            }
+
+            return (name.Trim(), uploadDate);
+        }
+
+        /// <summary>
+        /// From a list of channel search hits, the one whose title (or handle) exactly matches the
+        /// requested name once normalized; otherwise YouTube's top hit; null if there are none.
+        /// </summary>
+        public static SearchResult? PickBestChannelMatch(string name, IEnumerable<SearchResult> candidates)
+        {
+            var list = candidates.Where(c => !string.IsNullOrEmpty(c.Id?.ChannelId)).ToList();
+            var wanted = NormalizeName(name);
+            return list.FirstOrDefault(c => NormalizeName(c.Snippet?.Title) == wanted) ?? list.FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Stable re-ordering of full channel resources so exact title/handle matches for the query
+        /// come first; everything else keeps its incoming (relevance) order.
+        /// </summary>
+        public static IEnumerable<Channel> OrderChannelsByMatch(string query, IEnumerable<Channel> channels)
+        {
+            var wanted = NormalizeName(query);
+            return channels.OrderBy(c => IsExactChannelMatch(wanted, c) ? 0 : 1);
+        }
+
+        /// <summary>
+        /// Stable re-ordering of full video resources so exact title matches for the query come
+        /// first; everything else keeps its incoming (relevance) order.
+        /// </summary>
+        public static IEnumerable<YTVideo> OrderVideosByMatch(string query, IEnumerable<YTVideo> videos)
+        {
+            var wanted = NormalizeName(query);
+            return videos.OrderBy(v => NormalizeName(v.Snippet?.Title) == wanted ? 0 : 1);
+        }
+
+        /// <summary>
+        /// The video a local file most likely is, from a list of search hits for its title. Only
+        /// two kinds of evidence are accepted, so a near-miss never gets stamped onto the wrong
+        /// file: an exact normalized title match, or (when the file name carries an upload date)
+        /// the top hit published on that same UTC day. Null when neither holds.
+        /// </summary>
+        public static YTVideo? PickBestVideoMatch(string title, DateTime? uploadDate, IEnumerable<YTVideo> candidates)
+        {
+            var list = candidates.Where(v => !string.IsNullOrEmpty(v.Id)).ToList();
+            if (list.Count == 0)
+            {
+                return null;
+            }
+
+            var wanted = NormalizeName(title);
+            var exact = list.FirstOrDefault(v => NormalizeName(v.Snippet?.Title) == wanted);
+            if (exact != null)
+            {
+                return exact;
+            }
+
+            if (uploadDate.HasValue)
+            {
+                var top = list[0];
+                var published = top.Snippet?.PublishedAtDateTimeOffset;
+                if (published.HasValue && published.Value.UtcDateTime.Date == uploadDate.Value.Date)
+                {
+                    return top;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Parses brandingSettings.channel.keywords, which the API returns as a single string of
+        /// space-separated terms where multi-word terms are double-quoted:
+        /// <c>"rick astley" music 80s</c> → ["rick astley", "music", "80s"].
+        /// </summary>
+        public static IReadOnlyList<string> ParseChannelKeywords(string? keywords)
+        {
+            if (string.IsNullOrWhiteSpace(keywords))
+            {
+                return Array.Empty<string>();
+            }
+
+            var result = new List<string>();
+            var current = new StringBuilder();
+            var inQuotes = false;
+
+            foreach (var ch in keywords)
+            {
+                if (ch == '"')
+                {
+                    inQuotes = !inQuotes;
+                    continue;
+                }
+
+                if (char.IsWhiteSpace(ch) && !inQuotes)
+                {
+                    Flush();
+                    continue;
+                }
+
+                current.Append(ch);
+            }
+
+            Flush();
+            return result.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+            void Flush()
+            {
+                var term = current.ToString().Trim();
+                if (term.Length > 0)
+                {
+                    result.Add(term);
+                }
+
+                current.Clear();
+            }
+        }
+
+        /// <summary>
+        /// Turns a topicDetails.topicCategories entry (a Wikipedia URL such as
+        /// "https://en.wikipedia.org/wiki/Lifestyle_(sociology)") into a human-readable genre
+        /// ("Lifestyle"). Returns null for anything that isn't a Wikipedia article URL.
+        /// </summary>
+        public static string? TopicCategoryToGenre(string? topicUrl)
+        {
+            if (string.IsNullOrWhiteSpace(topicUrl) || !Uri.TryCreate(topicUrl, UriKind.Absolute, out var uri))
+            {
+                return null;
+            }
+
+            var segment = uri.Segments.LastOrDefault();
+            if (string.IsNullOrEmpty(segment) || segment == "/")
+            {
+                return null;
+            }
+
+            var title = Uri.UnescapeDataString(segment.TrimEnd('/')).Replace('_', ' ').Trim();
+            title = TrailingParentheticalRegex.Replace(title, string.Empty).Trim();
+            return title.Length == 0 ? null : title;
+        }
+
+        /// <summary>
+        /// Genres for a set of topic category URLs, de-duplicated and in API order.
+        /// </summary>
+        public static string[] TopicCategoriesToGenres(IEnumerable<string>? topicCategories)
+        {
+            if (topicCategories == null)
+            {
+                return Array.Empty<string>();
+            }
+
+            return topicCategories
+                .Select(TopicCategoryToGenre)
+                .Where(g => !string.IsNullOrEmpty(g))
+                .Select(g => g!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
         }
 
         /// <summary>
@@ -98,6 +414,12 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
                 item.Tags = snippet.Tags.ToArray();
             }
 
+            var genres = TopicCategoriesToGenres(video.TopicDetails?.TopicCategories);
+            if (genres.Length > 0)
+            {
+                item.Genres = genres;
+            }
+
             if (!string.IsNullOrEmpty(video.ContentDetails?.Duration))
             {
                 try
@@ -124,9 +446,13 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
                 var person = new PersonInfo
                 {
                     Name = snippet.ChannelTitle,
-                    Type = PersonKind.Director,
-                    ProviderIds = new Dictionary<string, string> { { Constants.PluginName, snippet.ChannelId } }
+                    Type = PersonKind.Director
                 };
+                if (!string.IsNullOrEmpty(snippet.ChannelId))
+                {
+                    person.ProviderIds = new Dictionary<string, string> { { Constants.PluginName, snippet.ChannelId } };
+                }
+
                 result.People = new List<PersonInfo> { person };
             }
 
@@ -134,7 +460,9 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
         }
 
         /// <summary>
-        /// Maps a YouTube Data API channel to a Jellyfin Series (a channel = one "show").
+        /// Maps a YouTube Data API channel to a Jellyfin Series (a channel = one "show"), using
+        /// every part the plugin requests: snippet (name, description, creation date, country,
+        /// handle), brandingSettings (keywords → tags) and topicDetails (topic categories → genres).
         /// </summary>
         public static MetadataResult<Series> ChannelToSeries(Channel channel)
         {
@@ -142,7 +470,8 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
             var item = new Series
             {
                 Name = snippet.Title,
-                Overview = snippet.Description
+                Overview = snippet.Description,
+                HomePageUrl = GetChannelHomePageUrl(channel)
             };
             item.ProviderIds.Add(Constants.PluginName, channel.Id);
 
@@ -153,7 +482,106 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
                 item.ProductionYear = published.Year;
             }
 
+            var keywords = ParseChannelKeywords(channel.BrandingSettings?.Channel?.Keywords);
+            if (keywords.Count > 0)
+            {
+                item.Tags = keywords.ToArray();
+            }
+
+            var genres = TopicCategoriesToGenres(channel.TopicDetails?.TopicCategories);
+            if (genres.Length > 0)
+            {
+                item.Genres = genres;
+            }
+
+            var country = snippet.Country ?? channel.BrandingSettings?.Channel?.Country;
+            if (!string.IsNullOrWhiteSpace(country))
+            {
+                item.ProductionLocations = new[] { CountryCodeToName(country) };
+            }
+
             return new MetadataResult<Series> { HasMetadata = true, Item = item };
+        }
+
+        /// <summary>
+        /// The channel's public URL: its handle URL ("https://www.youtube.com/@rickastley") when it
+        /// has one, otherwise the ID-based URL.
+        /// </summary>
+        public static string? GetChannelHomePageUrl(Channel channel)
+        {
+            var customUrl = channel.Snippet?.CustomUrl;
+            if (!string.IsNullOrWhiteSpace(customUrl))
+            {
+                return string.Format(CultureInfo.InvariantCulture, Constants.HandleUrl, customUrl.Trim().TrimStart('/'));
+            }
+
+            return string.IsNullOrEmpty(channel.Id) ? null : string.Format(CultureInfo.InvariantCulture, Constants.ChannelUrl, channel.Id);
+        }
+
+        /// <summary>
+        /// "US" → "United States". Falls back to the code itself for anything .NET doesn't know.
+        /// </summary>
+        public static string CountryCodeToName(string code)
+        {
+            var trimmed = code.Trim().ToUpperInvariant();
+            try
+            {
+                return new RegionInfo(trimmed).EnglishName;
+            }
+            catch (ArgumentException)
+            {
+                return trimmed;
+            }
+        }
+
+        /// <summary>
+        /// Everything Jellyfin's "Identify" dialog can show for a channel, from the full channel
+        /// resource: name, description, creation year/date, avatar.
+        /// </summary>
+        public static RemoteSearchResult ChannelToSearchResult(Channel channel)
+        {
+            var result = new RemoteSearchResult
+            {
+                Name = channel.Snippet?.Title,
+                Overview = channel.Snippet?.Description,
+                ImageUrl = GetBestThumbnailUrl(channel.Snippet?.Thumbnails),
+                SearchProviderName = Constants.PluginName,
+                ProviderIds = new Dictionary<string, string> { { Constants.PluginName, channel.Id } }
+            };
+
+            var published = channel.Snippet?.PublishedAtDateTimeOffset;
+            if (published.HasValue)
+            {
+                result.PremiereDate = published.Value.UtcDateTime;
+                result.ProductionYear = published.Value.UtcDateTime.Year;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Everything Jellyfin's "Identify" dialog can show for a video, from the full video
+        /// resource: title, description, upload year/date, thumbnail.
+        /// </summary>
+        public static RemoteSearchResult VideoToSearchResult(YTVideo video)
+        {
+            var result = new RemoteSearchResult
+            {
+                Name = video.Snippet?.Title,
+                Overview = video.Snippet?.Description,
+                ImageUrl = GetBestThumbnailUrl(video.Snippet?.Thumbnails),
+                SearchProviderName = Constants.PluginName,
+                ProviderIds = new Dictionary<string, string> { { Constants.PluginName, video.Id } }
+            };
+
+            var published = video.Snippet?.PublishedAtDateTimeOffset;
+            if (published.HasValue)
+            {
+                result.PremiereDate = published.Value.UtcDateTime;
+                result.ProductionYear = published.Value.UtcDateTime.Year;
+            }
+
+            return result;
         }
 
         /// <summary>
@@ -174,6 +602,17 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
                     || (s.PremiereDate == premiereDate && string.CompareOrdinal(s.VideoId, currentVideoId) < 0)));
 
             return rank + 1;
+        }
+
+        private static bool IsExactChannelMatch(string normalizedQuery, Channel channel)
+        {
+            if (normalizedQuery.Length == 0)
+            {
+                return false;
+            }
+
+            return NormalizeName(channel.Snippet?.Title) == normalizedQuery
+                || NormalizeName(channel.Snippet?.CustomUrl) == normalizedQuery;
         }
     }
 }

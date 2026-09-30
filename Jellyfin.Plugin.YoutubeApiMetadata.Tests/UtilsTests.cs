@@ -16,6 +16,294 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests
         {
             Assert.Equal(expected, Utils.GetYTID(fileName));
         }
+
+        [Theory]
+        [InlineData("Some Video [dQw4w9WgXcQ].mkv", "dQw4w9WgXcQ", "")]
+        [InlineData("Rick Astley [UCuAXFkgsw1L7xaCfnd5JJOw]", "", "UCuAXFkgsw1L7xaCfnd5JJOw")]
+        [InlineData("/media/Rick Astley [UCuAXFkgsw1L7xaCfnd5JJOw]/Some Video [dQw4w9WgXcQ].mkv", "dQw4w9WgXcQ", "UCuAXFkgsw1L7xaCfnd5JJOw")]
+        [InlineData("nothing here", "", "")]
+        public void GetVideoId_And_GetChannelId_OnlyMatchTheirOwnKind(string text, string videoId, string channelId)
+        {
+            Assert.Equal(videoId, Utils.GetVideoId(text));
+            Assert.Equal(channelId, Utils.GetChannelId(text));
+        }
+
+        [Theory]
+        [InlineData("/media/channels/Rick Astley/video.mkv", "video.mkv")]
+        [InlineData("C:\\media\\channels\\Rick Astley\\video.mkv", "video.mkv")]
+        [InlineData("/media/channels/Rick Astley/", "Rick Astley")]
+        [InlineData("video.mkv", "video.mkv")]
+        public void GetLastPathSegment_IsSeparatorAgnostic(string path, string expected)
+        {
+            Assert.Equal(expected, Utils.GetLastPathSegment(path));
+        }
+
+        [Theory]
+        [InlineData("/media/channels/Rick Astley/video.mkv", "/media/channels/Rick Astley")]
+        [InlineData("C:\\media\\Rick Astley\\video.mkv", "C:\\media\\Rick Astley")]
+        [InlineData("video.mkv", null)]
+        [InlineData("", null)]
+        [InlineData(null, null)]
+        public void GetParentPath_IsSeparatorAgnostic(string? path, string? expected)
+        {
+            Assert.Equal(expected, Utils.GetParentPath(path));
+        }
+
+        [Fact]
+        public void ResolveChannelId_IgnoresVideoIdInPath_AndIdsInAncestorFolders()
+        {
+            Assert.Null(Utils.ResolveChannelId(null, "/media/Some Video [dQw4w9WgXcQ]", null));
+            Assert.Null(Utils.ResolveChannelId(null, "/media/Parent [UCuAXFkgsw1L7xaCfnd5JJOw]/Child", null));
+            Assert.Equal("UCuAXFkgsw1L7xaCfnd5JJOw", Utils.ResolveChannelId(null, "/media/Rick Astley [UCuAXFkgsw1L7xaCfnd5JJOw]", null));
+            Assert.Equal("UCuAXFkgsw1L7xaCfnd5JJOw", Utils.ResolveChannelId(null, "/media/Rick Astley", "Rick Astley [UCuAXFkgsw1L7xaCfnd5JJOw]"));
+        }
+
+        [Theory]
+        [InlineData("@rickastley", true)]
+        [InlineData("@Rick.Astley_YT-1", true)]
+        [InlineData("  @rickastley  ", true)]
+        [InlineData("rickastley", false)]
+        [InlineData("@ab", false)]
+        [InlineData("@rick astley", false)]
+        [InlineData("", false)]
+        [InlineData(null, false)]
+        public void IsHandle(string? text, bool expected)
+        {
+            Assert.Equal(expected, Utils.IsHandle(text));
+        }
+
+        [Theory]
+        [InlineData("Rick Astley", "rick astley")]
+        [InlineData("  RICK   ASTLEY  ", "rick astley")]
+        [InlineData("Rick-Astley_(Official)!", "rick astley official")]
+        [InlineData("@RickAstley", "rickastley")]
+        [InlineData("Ünïcødé Näme", "ünïcødé näme")]
+        [InlineData("", "")]
+        [InlineData(null, "")]
+        public void NormalizeName(string? name, string expected)
+        {
+            Assert.Equal(expected, Utils.NormalizeName(name));
+        }
+
+        [Theory]
+        [InlineData("/media/channels/Rick Astley [UCuAXFkgsw1L7xaCfnd5JJOw]", "Rick Astley")]
+        [InlineData("/media/channels/Rick Astley/", "Rick Astley")]
+        [InlineData("C:\\media\\channels\\Rick Astley", "Rick Astley")]
+        [InlineData("/media/channels/@rickastley", "@rickastley")]
+        [InlineData("/media/channels/[UCuAXFkgsw1L7xaCfnd5JJOw]", null)]
+        [InlineData("", null)]
+        [InlineData(null, null)]
+        public void GetChannelNameFromPath(string? path, string? expected)
+        {
+            Assert.Equal(expected, Utils.GetChannelNameFromPath(path));
+        }
+
+        [Fact]
+        public void ParseEpisodeFileName_StripsDatePrefixIdAndExtension()
+        {
+            var (title, date) = Utils.ParseEpisodeFileName("/media/Rick Astley/20091025 - Never Gonna Give You Up [dQw4w9WgXcQ].mkv");
+
+            Assert.Equal("Never Gonna Give You Up", title);
+            Assert.Equal(new DateTime(2009, 10, 25, 0, 0, 0, DateTimeKind.Utc), date);
+        }
+
+        [Fact]
+        public void ParseEpisodeFileName_AcceptsDashedDates_AndChannelPrefix()
+        {
+            var (title, date) = Utils.ParseEpisodeFileName("Rick Astley - 2009-10-25 - Never Gonna Give You Up.webm");
+
+            Assert.Equal("Never Gonna Give You Up", title);
+            Assert.Equal(new DateTime(2009, 10, 25), date!.Value.Date);
+        }
+
+        [Fact]
+        public void ParseEpisodeFileName_LeavesTitleAlone_WhenNoDatePrefix()
+        {
+            var (title, date) = Utils.ParseEpisodeFileName("Never Gonna Give You Up.mp4");
+
+            Assert.Equal("Never Gonna Give You Up", title);
+            Assert.Null(date);
+        }
+
+        [Fact]
+        public void ParseEpisodeFileName_DoesNotTreatImpossibleDateAsDate()
+        {
+            var (title, date) = Utils.ParseEpisodeFileName("20091399 - Not A Date.mp4");
+
+            Assert.Equal("20091399 - Not A Date", title);
+            Assert.Null(date);
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData(null)]
+        public void ParseEpisodeFileName_HandlesBlankPath(string? path)
+        {
+            var (title, date) = Utils.ParseEpisodeFileName(path);
+
+            Assert.Equal(string.Empty, title);
+            Assert.Null(date);
+        }
+
+        [Fact]
+        public void PickBestChannelMatch_PrefersExactNormalizedTitle()
+        {
+            var candidates = new[]
+            {
+                Hit("UC1", "Rick Astley Fan Club"),
+                Hit("UC2", "RICK ASTLEY"),
+                Hit("UC3", "Rick Astley")
+            };
+
+            Assert.Equal("UC2", Utils.PickBestChannelMatch("rick-astley", candidates)!.Id.ChannelId);
+        }
+
+        [Fact]
+        public void PickBestChannelMatch_FallsBackToTopHit_SkippingHitsWithoutId()
+        {
+            var candidates = new[]
+            {
+                new SearchResult { Id = new ResourceId { VideoId = "notachannel" }, Snippet = new SearchResultSnippet { Title = "Video" } },
+                Hit("UC1", "Something Else")
+            };
+
+            Assert.Equal("UC1", Utils.PickBestChannelMatch("Rick Astley", candidates)!.Id.ChannelId);
+            Assert.Null(Utils.PickBestChannelMatch("Rick Astley", Array.Empty<SearchResult>()));
+        }
+
+        [Fact]
+        public void OrderChannelsByMatch_MovesExactTitleOrHandleMatchesFirst_KeepingOrderOtherwise()
+        {
+            var channels = new[]
+            {
+                Ch("UC1", "Rick Astley Fan Club"),
+                Ch("UC2", "Rick Astley Covers"),
+                Ch("UC3", "Rick Astley Official", customUrl: "@rickastley"),
+                Ch("UC4", "Rick Astley")
+            };
+
+            Assert.Equal(new[] { "UC4", "UC1", "UC2", "UC3" }, Utils.OrderChannelsByMatch("Rick Astley", channels).Select(c => c.Id));
+            Assert.Equal(new[] { "UC3", "UC1", "UC2", "UC4" }, Utils.OrderChannelsByMatch("@rickastley", channels).Select(c => c.Id));
+            Assert.Equal(new[] { "UC1", "UC2", "UC3", "UC4" }, Utils.OrderChannelsByMatch("", channels).Select(c => c.Id));
+        }
+
+        [Fact]
+        public void OrderVideosByMatch_MovesExactTitleMatchesFirst()
+        {
+            var videos = new[] { Vid("v1", "Never Gonna Give You Up (Live)"), Vid("v2", "never gonna give you up") };
+
+            Assert.Equal(new[] { "v2", "v1" }, Utils.OrderVideosByMatch("Never Gonna Give You Up", videos).Select(v => v.Id));
+        }
+
+        [Fact]
+        public void PickBestVideoMatch_ReturnsExactTitleMatch_AnywhereInList()
+        {
+            var videos = new[] { Vid("v1", "Never Gonna Give You Up (Live)"), Vid("v2", "Never Gonna Give You Up") };
+
+            Assert.Equal("v2", Utils.PickBestVideoMatch("never_gonna_give_you_up", null, videos)!.Id);
+        }
+
+        [Fact]
+        public void PickBestVideoMatch_AcceptsTopHit_WhenPublishedOnFileDate()
+        {
+            var videos = new[]
+            {
+                Vid("v1", "Rick Astley - Never Gonna Give You Up (Official Video)", published: new DateTimeOffset(2009, 10, 25, 23, 59, 0, TimeSpan.Zero)),
+                Vid("v2", "Never Gonna Give You Up", published: new DateTimeOffset(2009, 10, 25, 1, 0, 0, TimeSpan.Zero))
+            };
+
+            // v2 is exact, so it wins regardless of date...
+            Assert.Equal("v2", Utils.PickBestVideoMatch("Never Gonna Give You Up", new DateTime(2009, 10, 25), videos)!.Id);
+
+            // ...but with no exact match, the top hit is only accepted on a date match.
+            var noExact = new[] { videos[0] };
+            Assert.Equal("v1", Utils.PickBestVideoMatch("Never Gonna Give You Up", new DateTime(2009, 10, 25), noExact)!.Id);
+            Assert.Null(Utils.PickBestVideoMatch("Never Gonna Give You Up", new DateTime(2009, 10, 26), noExact));
+            Assert.Null(Utils.PickBestVideoMatch("Never Gonna Give You Up", null, noExact));
+        }
+
+        [Fact]
+        public void PickBestVideoMatch_ReturnsNull_ForNoCandidates()
+        {
+            Assert.Null(Utils.PickBestVideoMatch("anything", null, Array.Empty<Video>()));
+        }
+
+        [Theory]
+        [InlineData("\"rick astley\" music 80s", new[] { "rick astley", "music", "80s" })]
+        [InlineData("music   pop \"never gonna give you up\"", new[] { "music", "pop", "never gonna give you up" })]
+        [InlineData("music Music MUSIC", new[] { "music" })]
+        [InlineData("\"unterminated quote", new[] { "unterminated quote" })]
+        [InlineData("", new string[0])]
+        [InlineData(null, new string[0])]
+        public void ParseChannelKeywords(string? keywords, string[] expected)
+        {
+            Assert.Equal(expected, Utils.ParseChannelKeywords(keywords));
+        }
+
+        [Theory]
+        [InlineData("https://en.wikipedia.org/wiki/Music", "Music")]
+        [InlineData("https://en.wikipedia.org/wiki/Pop_music", "Pop music")]
+        [InlineData("https://en.wikipedia.org/wiki/Lifestyle_(sociology)", "Lifestyle")]
+        [InlineData("https://en.wikipedia.org/wiki/Role-playing_video_game", "Role-playing video game")]
+        [InlineData("https://en.wikipedia.org/wiki/Caf%C3%A9", "Café")]
+        [InlineData("https://en.wikipedia.org/", null)]
+        [InlineData("not a url", null)]
+        [InlineData("", null)]
+        [InlineData(null, null)]
+        public void TopicCategoryToGenre(string? url, string? expected)
+        {
+            Assert.Equal(expected, Utils.TopicCategoryToGenre(url));
+        }
+
+        [Fact]
+        public void TopicCategoriesToGenres_DeduplicatesAndDropsJunk()
+        {
+            var genres = Utils.TopicCategoriesToGenres(new[]
+            {
+                "https://en.wikipedia.org/wiki/Music",
+                "https://en.wikipedia.org/wiki/Pop_music",
+                "https://en.wikipedia.org/wiki/music",
+                "garbage"
+            });
+
+            Assert.Equal(new[] { "Music", "Pop music" }, genres);
+            Assert.Empty(Utils.TopicCategoriesToGenres(null));
+        }
+
+        [Theory]
+        [InlineData("US", "United States")]
+        [InlineData("gb", "United Kingdom")]
+        [InlineData("XX", "XX")]
+        public void CountryCodeToName(string code, string expected)
+        {
+            Assert.Equal(expected, Utils.CountryCodeToName(code));
+        }
+
+        [Fact]
+        public void GetBannerUrl_AppendsSizeSuffix_OrReturnsNull()
+        {
+            var channel = new Channel { BrandingSettings = new ChannelBrandingSettings { Image = new ImageSettings { BannerExternalUrl = "https://x/banner" } } };
+
+            Assert.Equal("https://x/banner" + Constants.BannerSuffix, Utils.GetBannerUrl(channel, Constants.BannerSuffix));
+            Assert.Null(Utils.GetBannerUrl(new Channel(), Constants.BannerSuffix));
+            Assert.Null(Utils.GetBannerUrl(null, Constants.BannerSuffix));
+        }
+
+        [Fact]
+        public void GetChannelHomePageUrl_PrefersHandle()
+        {
+            Assert.Equal("https://www.youtube.com/@rickastley", Utils.GetChannelHomePageUrl(Ch("UC1", "Rick", customUrl: "@rickastley")));
+            Assert.Equal("https://www.youtube.com/channel/UC1", Utils.GetChannelHomePageUrl(Ch("UC1", "Rick")));
+        }
+
+        private static SearchResult Hit(string channelId, string title)
+            => new() { Id = new ResourceId { ChannelId = channelId }, Snippet = new SearchResultSnippet { Title = title } };
+
+        private static Channel Ch(string id, string title, string? customUrl = null)
+            => new() { Id = id, Snippet = new ChannelSnippet { Title = title, CustomUrl = customUrl } };
+
+        private static Video Vid(string id, string title, DateTimeOffset? published = null)
+            => new() { Id = id, Snippet = new VideoSnippet { Title = title, PublishedAtDateTimeOffset = published } };
     }
 
     public class ConstantsTests
@@ -56,7 +344,8 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests
                     PublishedAtDateTimeOffset = new DateTimeOffset(2009, 10, 25, 6, 57, 33, TimeSpan.Zero),
                     Tags = new List<string> { "80s", "pop" }
                 },
-                ContentDetails = new VideoContentDetails { Duration = "PT3M33S" }
+                ContentDetails = new VideoContentDetails { Duration = "PT3M33S" },
+                TopicDetails = new VideoTopicDetails { TopicCategories = new List<string> { "https://en.wikipedia.org/wiki/Pop_music" } }
             };
 
             var result = Utils.VideoToEpisode(video);
@@ -72,6 +361,7 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests
             Assert.Equal("dQw4w9WgXcQ", result.Item.ProviderIds[Constants.PluginName]);
             Assert.Equal(TimeSpan.FromSeconds(213).Ticks, result.Item.RunTimeTicks);
             Assert.Contains("80s", result.Item.Tags);
+            Assert.Equal(new[] { "Pop music" }, result.Item.Genres);
 
             Assert.NotNull(result.People);
             Assert.Equal("Rick Astley", result.People[0].Name);
@@ -92,6 +382,17 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests
 
             Assert.True(result.HasMetadata);
             Assert.Null(result.Item.RunTimeTicks);
+            Assert.Empty(result.Item.Genres);
+        }
+
+        [Fact]
+        public void VideoToEpisode_AddsChannelAsPerson_EvenWithoutChannelId()
+        {
+            var video = new Video { Id = "v", Snippet = new VideoSnippet { Title = "T", ChannelTitle = "Rick Astley" } };
+
+            var result = Utils.VideoToEpisode(video);
+
+            Assert.Equal("Rick Astley", Assert.Single(result.People).Name);
         }
 
         [Fact]
@@ -115,6 +416,110 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests
             Assert.Equal("The official channel.", result.Item.Overview);
             Assert.Equal("UCuAXFkgsw1L7xaCfnd5JJOw", result.Item.ProviderIds[Constants.PluginName]);
             Assert.Equal(2006, result.Item.ProductionYear);
+            Assert.Equal(new DateTime(2006, 3, 14, 0, 0, 0, DateTimeKind.Utc), result.Item.PremiereDate);
+            Assert.Equal("https://www.youtube.com/channel/UCuAXFkgsw1L7xaCfnd5JJOw", result.Item.HomePageUrl);
+            Assert.Empty(result.Item.Tags);
+            Assert.Empty(result.Item.Genres);
+            Assert.Empty(result.Item.ProductionLocations);
+        }
+
+        [Fact]
+        public void ChannelToSeries_MapsEveryExtendedPart()
+        {
+            var channel = new Channel
+            {
+                Id = "UCuAXFkgsw1L7xaCfnd5JJOw",
+                Snippet = new ChannelSnippet
+                {
+                    Title = "Rick Astley",
+                    Description = "The official channel.",
+                    CustomUrl = "@rickastleyyt",
+                    Country = "GB"
+                },
+                BrandingSettings = new ChannelBrandingSettings
+                {
+                    Channel = new ChannelSettings { Keywords = "\"rick astley\" music 80s" }
+                },
+                TopicDetails = new ChannelTopicDetails
+                {
+                    TopicCategories = new List<string>
+                    {
+                        "https://en.wikipedia.org/wiki/Music",
+                        "https://en.wikipedia.org/wiki/Pop_music"
+                    }
+                }
+            };
+
+            var result = Utils.ChannelToSeries(channel);
+
+            Assert.Equal(new[] { "rick astley", "music", "80s" }, result.Item.Tags);
+            Assert.Equal(new[] { "Music", "Pop music" }, result.Item.Genres);
+            Assert.Equal(new[] { "United Kingdom" }, result.Item.ProductionLocations);
+            Assert.Equal("https://www.youtube.com/@rickastleyyt", result.Item.HomePageUrl);
+        }
+
+        [Fact]
+        public void ChannelToSeries_FallsBackToBrandingCountry()
+        {
+            var channel = new Channel
+            {
+                Id = "UC1",
+                Snippet = new ChannelSnippet { Title = "T" },
+                BrandingSettings = new ChannelBrandingSettings { Channel = new ChannelSettings { Country = "US" } }
+            };
+
+            Assert.Equal(new[] { "United States" }, Utils.ChannelToSeries(channel).Item.ProductionLocations);
+        }
+
+        [Fact]
+        public void ChannelToSearchResult_CarriesEverythingIdentifyCanShow()
+        {
+            var channel = new Channel
+            {
+                Id = "UC1",
+                Snippet = new ChannelSnippet
+                {
+                    Title = "Rick Astley",
+                    Description = "Desc",
+                    PublishedAtDateTimeOffset = new DateTimeOffset(2006, 3, 14, 0, 0, 0, TimeSpan.Zero),
+                    Thumbnails = new ThumbnailDetails { Medium = new Thumbnail { Url = "medium.jpg" } }
+                }
+            };
+
+            var result = Utils.ChannelToSearchResult(channel);
+
+            Assert.Equal("Rick Astley", result.Name);
+            Assert.Equal("Desc", result.Overview);
+            Assert.Equal(2006, result.ProductionYear);
+            Assert.Equal(new DateTime(2006, 3, 14, 0, 0, 0, DateTimeKind.Utc), result.PremiereDate);
+            Assert.Equal("medium.jpg", result.ImageUrl);
+            Assert.Equal("UC1", result.ProviderIds[Constants.PluginName]);
+            Assert.Equal(Constants.PluginName, result.SearchProviderName);
+        }
+
+        [Fact]
+        public void VideoToSearchResult_CarriesEverythingIdentifyCanShow()
+        {
+            var video = new Video
+            {
+                Id = "dQw4w9WgXcQ",
+                Snippet = new VideoSnippet
+                {
+                    Title = "Never Gonna Give You Up",
+                    Description = "Desc",
+                    PublishedAtDateTimeOffset = new DateTimeOffset(2009, 10, 25, 6, 57, 33, TimeSpan.Zero),
+                    Thumbnails = new ThumbnailDetails { Maxres = new Thumbnail { Url = "maxres.jpg" } }
+                }
+            };
+
+            var result = Utils.VideoToSearchResult(video);
+
+            Assert.Equal("Never Gonna Give You Up", result.Name);
+            Assert.Equal("Desc", result.Overview);
+            Assert.Equal(2009, result.ProductionYear);
+            Assert.Equal("maxres.jpg", result.ImageUrl);
+            Assert.Equal("dQw4w9WgXcQ", result.ProviderIds[Constants.PluginName]);
+            Assert.Equal(Constants.PluginName, result.SearchProviderName);
         }
 
         [Fact]

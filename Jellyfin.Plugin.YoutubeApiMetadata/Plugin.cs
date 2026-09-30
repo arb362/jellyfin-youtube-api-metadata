@@ -63,6 +63,10 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
     {
         public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
         {
+            // Providers read settings through this accessor (rather than Plugin.Instance directly)
+            // so they always see the *current* configuration and can be unit-tested without a
+            // running Jellyfin host.
+            serviceCollection.AddSingleton<Func<PluginConfiguration>>(_ => () => Plugin.Instance.Configuration);
             serviceCollection.AddTransient<IYouTubeApiClient>(_ => new YouTubeApiClient(Plugin.Instance.Configuration.ApiKey));
             serviceCollection.AddSingleton<IMetadataCache>(sp => new FileMetadataCache(
                 sp.GetRequiredService<IApplicationPaths>(),

@@ -4,7 +4,9 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using Google.Apis.YouTube.v3.Data;
 using Jellyfin.Data.Enums;
+using Jellyfin.Plugin.YoutubeApiMetadata.Configuration;
 using Jellyfin.Plugin.YoutubeApiMetadata.YouTube;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
@@ -15,29 +17,27 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Providers
 {
     /// <summary>
     /// Fetches Episode metadata (a single YouTube video) from the YouTube Data API v3.
+    /// A video is located by (in order) its stored provider ID, the "[videoId]" in its file name,
+    /// or — when the file name carries no ID — a title search within its channel.
     /// </summary>
     public class YoutubeEpisodeProvider : IRemoteMetadataProvider<Episode, EpisodeInfo>
     {
         private readonly IYoutubeMetadataResolver _resolver;
         private readonly ILibraryManager _libraryManager;
+        private readonly Func<PluginConfiguration> _getConfiguration;
 
-        public YoutubeEpisodeProvider(IYoutubeMetadataResolver resolver, ILibraryManager libraryManager)
+        public YoutubeEpisodeProvider(IYoutubeMetadataResolver resolver, ILibraryManager libraryManager, Func<PluginConfiguration> getConfiguration)
         {
             _resolver = resolver;
             _libraryManager = libraryManager;
+            _getConfiguration = getConfiguration;
         }
 
         public string Name => Constants.PluginName;
 
         public async Task<MetadataResult<Episode>> GetMetadata(EpisodeInfo info, CancellationToken cancellationToken)
         {
-            var videoId = Utils.GetYTID(info.Path ?? string.Empty);
-            if (string.IsNullOrEmpty(videoId))
-            {
-                return new MetadataResult<Episode>();
-            }
-
-            var video = await _resolver.GetVideoAsync(videoId, cancellationToken).ConfigureAwait(false);
+            var video = await ResolveVideoAsync(info, cancellationToken).ConfigureAwait(false);
             if (video == null)
             {
                 return new MetadataResult<Episode>();
@@ -46,12 +46,138 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Providers
             var result = Utils.VideoToEpisode(video);
             if (result.Item.PremiereDate.HasValue)
             {
-                var siblings = GetSiblingPremiereDates(info.SeriesProviderIds, videoId);
+                var channelId = GetKnownChannelId(info.SeriesProviderIds) ?? video.Snippet?.ChannelId;
+                var siblings = GetSiblingPremiereDates(channelId, video.Id);
                 result.Item.ParentIndexNumber = 1;
-                result.Item.IndexNumber = Utils.ComputeEpisodeIndex(videoId, result.Item.PremiereDate.Value, siblings);
+                result.Item.IndexNumber = Utils.ComputeEpisodeIndex(video.Id, result.Item.PremiereDate.Value, siblings);
             }
 
             return result;
+        }
+
+        public async Task<IEnumerable<RemoteSearchResult>> GetSearchResults(EpisodeInfo searchInfo, CancellationToken cancellationToken)
+        {
+            var videoId = GetKnownVideoId(searchInfo);
+            if (!string.IsNullOrEmpty(videoId))
+            {
+                var video = await _resolver.GetVideoAsync(videoId, cancellationToken).ConfigureAwait(false);
+                return video == null ? Array.Empty<RemoteSearchResult>() : new[] { Utils.VideoToSearchResult(video) };
+            }
+
+            // In the Identify dialog, Name is whatever the user typed; on an automatic lookup it is
+            // Jellyfin's parsed episode name, which for YouTube files is usually worse than our own
+            // parse of the file name (Jellyfin's episode parser expects "S01E01"-style names).
+            var (fileTitle, _) = Utils.ParseEpisodeFileName(searchInfo.Path);
+            var query = string.IsNullOrWhiteSpace(searchInfo.Name) ? fileTitle : searchInfo.Name;
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                return Array.Empty<RemoteSearchResult>();
+            }
+
+            // Scope to the channel when it's known; a manual search with no known channel is still
+            // useful (the user picks the right hit), so fall through to a site-wide search.
+            var channelId = await ResolveChannelIdAsync(searchInfo, cancellationToken).ConfigureAwait(false);
+            var matches = await _resolver.SearchVideosAsync(query, channelId, GetSearchResultLimit(), cancellationToken).ConfigureAwait(false);
+            return matches
+                .Where(v => !string.IsNullOrEmpty(v.Id))
+                .Select(Utils.VideoToSearchResult)
+                .ToList();
+        }
+
+        public Task<HttpResponseMessage> GetImageResponse(string url, CancellationToken cancellationToken)
+        {
+            return Plugin.Instance.GetHttpClient().GetAsync(url, cancellationToken);
+        }
+
+        private async Task<Video?> ResolveVideoAsync(EpisodeInfo info, CancellationToken cancellationToken)
+        {
+            var videoId = GetKnownVideoId(info);
+            if (!string.IsNullOrEmpty(videoId))
+            {
+                return await _resolver.GetVideoAsync(videoId, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!_getConfiguration().EnableTitleSearchFallback)
+            {
+                return null;
+            }
+
+            var (title, uploadDate) = Utils.ParseEpisodeFileName(info.Path);
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                return null;
+            }
+
+            // Automatic (unattended) matching is only attempted inside the file's own channel: an
+            // exact title match across all of YouTube is not strong enough evidence on its own.
+            var channelId = await ResolveChannelIdAsync(info, cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrEmpty(channelId))
+            {
+                return null;
+            }
+
+            return await _resolver.FindVideoByTitleAsync(title, channelId, uploadDate, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// The channel a file belongs to: the series' stored provider ID when Jellyfin passes one,
+        /// otherwise a channel-name lookup on the parent folder (same rules as the series provider).
+        /// </summary>
+        private async Task<string?> ResolveChannelIdAsync(EpisodeInfo info, CancellationToken cancellationToken)
+        {
+            var known = GetKnownChannelId(info.SeriesProviderIds);
+            if (!string.IsNullOrEmpty(known))
+            {
+                return known;
+            }
+
+            var parentFolder = Utils.GetParentPath(info.Path);
+            var fromFolder = Utils.GetChannelId(Utils.GetLastPathSegment(parentFolder ?? string.Empty));
+            if (!string.IsNullOrEmpty(fromFolder))
+            {
+                return fromFolder;
+            }
+
+            if (!_getConfiguration().EnableChannelNameSearch)
+            {
+                return null;
+            }
+
+            var channelName = Utils.GetChannelNameFromPath(parentFolder);
+            if (string.IsNullOrWhiteSpace(channelName))
+            {
+                return null;
+            }
+
+            var channel = await _resolver.FindChannelByNameAsync(channelName, cancellationToken).ConfigureAwait(false);
+            return channel?.Id;
+        }
+
+        private static string? GetKnownVideoId(EpisodeInfo info)
+        {
+            if (info.ProviderIds != null && info.ProviderIds.TryGetValue(Constants.PluginName, out var id) && !string.IsNullOrEmpty(id))
+            {
+                return id;
+            }
+
+            // Only the file name itself: the parent folder may carry a "[channelId]".
+            var fromPath = Utils.GetVideoId(Utils.GetLastPathSegment(info.Path ?? string.Empty));
+            return string.IsNullOrEmpty(fromPath) ? null : fromPath;
+        }
+
+        private static string? GetKnownChannelId(IReadOnlyDictionary<string, string>? seriesProviderIds)
+        {
+            return seriesProviderIds != null
+                && seriesProviderIds.TryGetValue(Constants.PluginName, out var channelId)
+                && !string.IsNullOrEmpty(channelId)
+                ? channelId
+                : null;
+        }
+
+        private int GetSearchResultLimit()
+        {
+            var limit = _getConfiguration().SearchResultLimit;
+            return Math.Clamp(limit <= 0 ? 10 : limit, 1, Constants.MaxIdsPerListRequest);
         }
 
         /// <summary>
@@ -60,13 +186,9 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Providers
         /// every video in the channel can be assigned a distinct <see cref="Episode.IndexNumber"/>
         /// and none of them collapse into "alternate versions" of the same episode.
         /// </summary>
-        private IEnumerable<(string VideoId, DateTime PremiereDate)> GetSiblingPremiereDates(
-            IReadOnlyDictionary<string, string> seriesProviderIds,
-            string currentVideoId)
+        private IEnumerable<(string VideoId, DateTime PremiereDate)> GetSiblingPremiereDates(string? channelId, string currentVideoId)
         {
-            if (seriesProviderIds == null
-                || !seriesProviderIds.TryGetValue(Constants.PluginName, out var channelId)
-                || string.IsNullOrEmpty(channelId))
+            if (string.IsNullOrEmpty(channelId))
             {
                 return Array.Empty<(string, DateTime)>();
             }
@@ -92,40 +214,6 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Providers
                     && id != currentVideoId)
                 .Select(e => (e.ProviderIds[Constants.PluginName], e.PremiereDate!.Value))
                 .ToList();
-        }
-
-        public async Task<IEnumerable<RemoteSearchResult>> GetSearchResults(EpisodeInfo searchInfo, CancellationToken cancellationToken)
-        {
-            var videoId = searchInfo.ProviderIds.TryGetValue(Constants.PluginName, out var id)
-                ? id
-                : Utils.GetYTID(searchInfo.Path ?? string.Empty);
-
-            if (string.IsNullOrEmpty(videoId))
-            {
-                return Array.Empty<RemoteSearchResult>();
-            }
-
-            var video = await _resolver.GetVideoAsync(videoId, cancellationToken).ConfigureAwait(false);
-            if (video == null)
-            {
-                return Array.Empty<RemoteSearchResult>();
-            }
-
-            return new[]
-            {
-                new RemoteSearchResult
-                {
-                    Name = video.Snippet.Title,
-                    Overview = video.Snippet.Description,
-                    ProviderIds = new Dictionary<string, string> { { Constants.PluginName, video.Id } },
-                    ImageUrl = Utils.GetBestThumbnailUrl(video.Snippet.Thumbnails)
-                }
-            };
-        }
-
-        public Task<HttpResponseMessage> GetImageResponse(string url, CancellationToken cancellationToken)
-        {
-            return Plugin.Instance.GetHttpClient().GetAsync(url, cancellationToken);
         }
     }
 }

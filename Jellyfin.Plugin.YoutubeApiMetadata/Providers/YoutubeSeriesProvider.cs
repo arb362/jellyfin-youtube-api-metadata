@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Google.Apis.YouTube.v3.Data;
+using Jellyfin.Plugin.YoutubeApiMetadata.Configuration;
 using Jellyfin.Plugin.YoutubeApiMetadata.YouTube;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Providers;
@@ -16,29 +17,26 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Providers
     /// Fetches Series metadata (a YouTube channel = a "show") from the YouTube Data API v3.
     /// A series folder can be named "Channel Name [channelId]" (24-char channel ID between square
     /// brackets, same convention as episode files) to resolve without a search. Folders following
-    /// yt-dlp's plain "%(uploader)s" convention (no ID) fall back to a name search on first import;
-    /// the resolved channel ID is then persisted to ProviderIds so later scans skip the search.
+    /// yt-dlp's plain "%(uploader)s" convention (no ID) — or named after the channel's handle,
+    /// "@rickastley" — fall back to a name lookup on first import; the resolved channel ID is then
+    /// persisted to ProviderIds so later scans skip the lookup.
     /// </summary>
     public class YoutubeSeriesProvider : IRemoteMetadataProvider<Series, SeriesInfo>
     {
-        private readonly IYouTubeApiClient _client;
         private readonly IYoutubeMetadataResolver _resolver;
+        private readonly Func<PluginConfiguration> _getConfiguration;
 
-        public YoutubeSeriesProvider(IYouTubeApiClient client, IYoutubeMetadataResolver resolver)
+        public YoutubeSeriesProvider(IYoutubeMetadataResolver resolver, Func<PluginConfiguration> getConfiguration)
         {
-            _client = client;
             _resolver = resolver;
+            _getConfiguration = getConfiguration;
         }
 
         public string Name => Constants.PluginName;
 
         public async Task<MetadataResult<Series>> GetMetadata(SeriesInfo info, CancellationToken cancellationToken)
         {
-            var channelId = Utils.ResolveChannelId(info.ProviderIds, info.Path, info.Name);
-            var channel = string.IsNullOrEmpty(channelId)
-                ? await FindSingleChannelByNameAsync(info.Name, cancellationToken).ConfigureAwait(false)
-                : await _resolver.GetChannelAsync(channelId, cancellationToken).ConfigureAwait(false);
-
+            var channel = await ResolveChannelAsync(info, cancellationToken).ConfigureAwait(false);
             return channel == null ? new MetadataResult<Series>() : Utils.ChannelToSeries(channel);
         }
 
@@ -48,54 +46,60 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Providers
             if (!string.IsNullOrEmpty(channelId))
             {
                 var channel = await _resolver.GetChannelAsync(channelId, cancellationToken).ConfigureAwait(false);
-                return channel == null ? Array.Empty<RemoteSearchResult>() : new[] { ToSearchResult(channel) };
+                return channel == null ? Array.Empty<RemoteSearchResult>() : new[] { Utils.ChannelToSearchResult(channel) };
             }
 
-            if (string.IsNullOrWhiteSpace(searchInfo.Name))
+            // In the Identify dialog, Name is whatever the user typed; on an automatic lookup it is
+            // Jellyfin's parsed folder name. Either way it's the channel name (or handle) to search.
+            var query = string.IsNullOrWhiteSpace(searchInfo.Name)
+                ? Utils.GetChannelNameFromPath(searchInfo.Path)
+                : searchInfo.Name;
+
+            if (string.IsNullOrWhiteSpace(query))
             {
                 return Array.Empty<RemoteSearchResult>();
             }
 
-            var matches = await _client.SearchChannelsAsync(searchInfo.Name, 10, cancellationToken).ConfigureAwait(false);
+            var matches = await _resolver.SearchChannelsAsync(query, GetSearchResultLimit(), cancellationToken).ConfigureAwait(false);
             return matches
-                .Where(m => !string.IsNullOrEmpty(m.Id?.ChannelId))
-                .Select(m => new RemoteSearchResult
-                {
-                    Name = m.Snippet.Title,
-                    Overview = m.Snippet.Description,
-                    ProviderIds = new Dictionary<string, string> { { Constants.PluginName, m.Id.ChannelId } },
-                    ImageUrl = Utils.GetBestThumbnailUrl(m.Snippet.Thumbnails)
-                })
+                .Where(c => !string.IsNullOrEmpty(c.Id))
+                .Select(Utils.ChannelToSearchResult)
                 .ToList();
         }
-
-        private static RemoteSearchResult ToSearchResult(Channel channel) => new()
-        {
-            Name = channel.Snippet.Title,
-            Overview = channel.Snippet.Description,
-            ProviderIds = new Dictionary<string, string> { { Constants.PluginName, channel.Id } },
-            ImageUrl = Utils.GetBestThumbnailUrl(channel.Snippet.Thumbnails)
-        };
 
         public Task<HttpResponseMessage> GetImageResponse(string url, CancellationToken cancellationToken)
         {
             return Plugin.Instance.GetHttpClient().GetAsync(url, cancellationToken);
         }
 
-        /// <summary>
-        /// Last-resort lookup for folders with no known channel ID: searches YouTube by name and
-        /// fetches full details for the top match.
-        /// </summary>
-        private async Task<Channel?> FindSingleChannelByNameAsync(string? name, CancellationToken cancellationToken)
+        private async Task<Channel?> ResolveChannelAsync(SeriesInfo info, CancellationToken cancellationToken)
         {
+            var channelId = Utils.ResolveChannelId(info.ProviderIds, info.Path, info.Name);
+            if (!string.IsNullOrEmpty(channelId))
+            {
+                return await _resolver.GetChannelAsync(channelId, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!_getConfiguration().EnableChannelNameSearch)
+            {
+                return null;
+            }
+
+            // Prefer the raw folder name over Jellyfin's parsed Name: the parser can strip pieces a
+            // channel name legitimately contains (a trailing year in parentheses, for instance).
+            var name = Utils.GetChannelNameFromPath(info.Path) ?? info.Name;
             if (string.IsNullOrWhiteSpace(name))
             {
                 return null;
             }
 
-            var matches = await _client.SearchChannelsAsync(name, 1, cancellationToken).ConfigureAwait(false);
-            var channelId = matches.FirstOrDefault()?.Id?.ChannelId;
-            return string.IsNullOrEmpty(channelId) ? null : await _resolver.GetChannelAsync(channelId, cancellationToken).ConfigureAwait(false);
+            return await _resolver.FindChannelByNameAsync(name, cancellationToken).ConfigureAwait(false);
+        }
+
+        private int GetSearchResultLimit()
+        {
+            var limit = _getConfiguration().SearchResultLimit;
+            return Math.Clamp(limit <= 0 ? 10 : limit, 1, Constants.MaxIdsPerListRequest);
         }
     }
 }

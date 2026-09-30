@@ -22,5 +22,14 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Caching
         Task<Channel?> GetChannelAsync(string channelId, CancellationToken cancellationToken);
 
         Task SaveChannelAsync(string channelId, Channel channel, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Returns the channel ID previously resolved for a channel name/handle (as normalized by
+        /// <see cref="Utils.NormalizeName"/>), or null if there is no fresh entry. Lets a folder
+        /// whose name has no embedded ID be re-resolved without repeating a 100-unit search.
+        /// </summary>
+        Task<string?> GetChannelIdForNameAsync(string normalizedName, CancellationToken cancellationToken);
+
+        Task SaveChannelIdForNameAsync(string normalizedName, string channelId, CancellationToken cancellationToken);
     }
 }

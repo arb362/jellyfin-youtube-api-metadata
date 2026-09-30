@@ -18,6 +18,33 @@
                         How long a cached API response is reused before being refreshed.
                     </div>
                 </div>
+
+                <h2 class="sectionTitle">Lookups without IDs</h2>
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="enableChannelNameSearch" />
+                        <span>Find channels by folder name</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        When a series folder has no <code>[channelId]</code> in its name, search YouTube for the folder name (a handle like <code>@rickastley</code> is resolved exactly, 1 quota unit; any other name is a search, 100 quota units). Paid once per folder: the result is cached and stored on the item.
+                    </div>
+                </div>
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="enableTitleSearchFallback" />
+                        <span>Find videos by file name</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        When a video file has no <code>[videoId]</code> in its name, search its channel for the file's title (100 quota units, once per file). Only an exact title match, or the top hit uploaded on the date in the file name, is accepted.
+                    </div>
+                </div>
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="searchResultLimit" min="1" max="50" label="Identify results" />
+                    <div class="fieldDescription">
+                        How many candidates the manual "Identify" dialog lists for a channel or video search.
+                    </div>
+                </div>
+
                 <div>
                     <button id="save-button" is="emby-button" type="submit" class="raised button-submit block">
                         <span>Save</span>

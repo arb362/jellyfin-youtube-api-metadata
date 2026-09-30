@@ -1,12 +1,12 @@
 ---
 name: "YouTube API Metadata"
 guid: "338cccea-4c27-474e-8934-4c7c3737d034"
-version: "0.2.0.0"
+version: "0.3.0.0"
 targetAbi: "12.0.0"
 framework: "net10.0"
 owner: "314"
 overview: "YouTube metadata provider using the official YouTube Data API v3"
-description: "Provides YouTube metadata (title, description, thumbnails, channel info, stats) via the official YouTube Data API v3, without depending on yt-dlp. Requires Jellyfin 12.x; not compatible with Jellyfin 10.11.x."
+description: "Provides YouTube metadata (title, description, thumbnails, banners, channel info, keywords, topics) via the official YouTube Data API v3, without depending on yt-dlp. Finds channels by folder name or @handle and videos by file name. Requires Jellyfin 12.x; not compatible with Jellyfin 10.11.x."
 category: "Metadata"
 artifacts:
 - "Jellyfin.Plugin.YoutubeApiMetadata.dll"
@@ -18,4 +18,9 @@ artifacts:
 - "System.CodeDom.dll"
 - "System.Management.dll"
 changelog: >
-  Ported to Jellyfin 12.0 (net10.0, Jellyfin.Controller/Jellyfin.Data 12.0.0). Drops Jellyfin 10.11.x support.
+  Channel-name search: series folders without a [channelId] are resolved by name or @handle
+  (exact match preferred, result cached), and the Identify dialog returns full channel details.
+  Video files without a [videoId] are matched by title within their channel. Series now get
+  keywords as tags, topic categories as genres, country, home page URL, and the channel banner
+  as backdrop/banner images; episodes get topic categories as genres. New settings to toggle the
+  name/title lookups and the Identify result count.

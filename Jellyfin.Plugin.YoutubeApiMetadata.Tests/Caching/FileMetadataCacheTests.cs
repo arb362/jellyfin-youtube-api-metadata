@@ -91,5 +91,53 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests.Caching
             var result = await _cache.GetVideoAsync(video.Id, CancellationToken.None);
             Assert.NotNull(result);
         }
+        [Fact]
+        public async Task GetChannelIdForNameAsync_ReturnsNullWhenNothingCached()
+        {
+            Assert.Null(await _cache.GetChannelIdForNameAsync("rick astley", CancellationToken.None));
+        }
+
+        [Fact]
+        public async Task SaveThenGetChannelIdForNameAsync_RoundTrips()
+        {
+            await _cache.SaveChannelIdForNameAsync("rick astley", "UCuAXFkgsw1L7xaCfnd5JJOw", CancellationToken.None);
+
+            Assert.Equal("UCuAXFkgsw1L7xaCfnd5JJOw", await _cache.GetChannelIdForNameAsync("rick astley", CancellationToken.None));
+        }
+
+        [Fact]
+        public async Task SaveChannelIdForNameAsync_HandlesNamesThatAreNotValidFileNames()
+        {
+            const string awkward = "a/b\\c:d*e?f\"g<h>i|j. ";
+
+            await _cache.SaveChannelIdForNameAsync(awkward, "UCuAXFkgsw1L7xaCfnd5JJOw", CancellationToken.None);
+
+            Assert.Equal("UCuAXFkgsw1L7xaCfnd5JJOw", await _cache.GetChannelIdForNameAsync(awkward, CancellationToken.None));
+            Assert.Null(await _cache.GetChannelIdForNameAsync("a/b", CancellationToken.None));
+        }
+
+        [Fact]
+        public async Task GetChannelIdForNameAsync_ReturnsNullWhenEntryIsExpired()
+        {
+            await _cache.SaveChannelIdForNameAsync("rick astley", "UCuAXFkgsw1L7xaCfnd5JJOw", CancellationToken.None);
+
+            var nameCacheDir = Path.Combine(_tempDir, Constants.CacheDirectoryName, Constants.ChannelNameCacheDirectoryName);
+            foreach (var file in Directory.GetFiles(nameCacheDir))
+            {
+                File.SetLastWriteTimeUtc(file, DateTime.UtcNow.AddDays(-11));
+            }
+
+            Assert.Null(await _cache.GetChannelIdForNameAsync("rick astley", CancellationToken.None));
+        }
+
+        [Theory]
+        [InlineData("", "UCuAXFkgsw1L7xaCfnd5JJOw")]
+        [InlineData("rick astley", "")]
+        public async Task SaveChannelIdForNameAsync_IgnoresBlankKeysOrValues(string name, string channelId)
+        {
+            await _cache.SaveChannelIdForNameAsync(name, channelId, CancellationToken.None);
+
+            Assert.False(Directory.Exists(Path.Combine(_tempDir, Constants.CacheDirectoryName, Constants.ChannelNameCacheDirectoryName)));
+        }
     }
 }
