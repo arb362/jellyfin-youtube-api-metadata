@@ -114,6 +114,26 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests.YouTube
         }
 
         [Fact]
+        public async Task ApiKey_IsReadOnEveryCall_SoAKeySavedAfterStartupIsUsed()
+        {
+            // Jellyfin constructs the client at startup, before the admin has entered a key; the key
+            // must be picked up (and a changed key applied) without restarting the server.
+            var apiKey = string.Empty;
+            var handler = new FakeHttpMessageHandler(VideoListResponse);
+            using var client = new YouTubeApiClient(() => apiKey, new FakeGoogleHttpClientFactory(handler));
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetVideoAsync("dQw4w9WgXcQ", CancellationToken.None));
+
+            apiKey = "FIRSTKEY";
+            await client.GetVideoAsync("dQw4w9WgXcQ", CancellationToken.None);
+            Assert.Contains("key=FIRSTKEY", handler.LastRequest!.RequestUri!.Query);
+
+            apiKey = " SECONDKEY ";
+            await client.GetVideoAsync("dQw4w9WgXcQ", CancellationToken.None);
+            Assert.Contains("key=SECONDKEY", handler.LastRequest!.RequestUri!.Query);
+        }
+
+        [Fact]
         public async Task GetVideoAsync_ReturnsNullWhenNotFound()
         {
             var handler = new FakeHttpMessageHandler(EmptyListResponse);

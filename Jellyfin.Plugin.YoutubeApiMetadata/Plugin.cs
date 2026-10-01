@@ -67,7 +67,9 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
             // so they always see the *current* configuration and can be unit-tested without a
             // running Jellyfin host.
             serviceCollection.AddSingleton<Func<PluginConfiguration>>(_ => () => Plugin.Instance.Configuration);
-            serviceCollection.AddTransient<IYouTubeApiClient>(_ => new YouTubeApiClient(Plugin.Instance.Configuration.ApiKey));
+            // The key is read on every call (not captured here) so saving a key in the settings
+            // page works without a restart - providers holding this client are created at startup.
+            serviceCollection.AddSingleton<IYouTubeApiClient>(_ => new YouTubeApiClient(() => Plugin.Instance.Configuration.ApiKey));
             serviceCollection.AddSingleton<IMetadataCache>(sp => new FileMetadataCache(
                 sp.GetRequiredService<IApplicationPaths>(),
                 () => Plugin.Instance.Configuration.CacheExpirationDays));

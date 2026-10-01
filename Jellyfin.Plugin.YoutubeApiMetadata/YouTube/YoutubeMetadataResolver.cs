@@ -5,6 +5,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Google.Apis.YouTube.v3.Data;
 using Jellyfin.Plugin.YoutubeApiMetadata.Caching;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Jellyfin.Plugin.YoutubeApiMetadata.YouTube
 {
@@ -20,11 +22,13 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.YouTube
 
         private readonly IYouTubeApiClient _client;
         private readonly IMetadataCache _cache;
+        private readonly ILogger<YoutubeMetadataResolver> _logger;
 
-        public YoutubeMetadataResolver(IYouTubeApiClient client, IMetadataCache cache)
+        public YoutubeMetadataResolver(IYouTubeApiClient client, IMetadataCache cache, ILogger<YoutubeMetadataResolver>? logger = null)
         {
             _client = client;
             _cache = cache;
+            _logger = logger ?? NullLogger<YoutubeMetadataResolver>.Instance;
         }
 
         public async Task<Video?> GetVideoAsync(string videoId, CancellationToken cancellationToken)
@@ -83,12 +87,19 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.YouTube
             if (Utils.IsHandle(name))
             {
                 channel = await _client.GetChannelByHandleAsync(name.Trim(), cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation("YouTube handle lookup for {Name}: {Result}", name, channel == null ? "no channel" : channel.Id);
             }
 
             if (channel == null)
             {
                 var candidates = await _client.SearchChannelsAsync(name.Trim(), SingleMatchCandidates, cancellationToken).ConfigureAwait(false);
-                var bestId = Utils.PickBestChannelMatch(name, candidates)?.Id?.ChannelId;
+                var best = Utils.PickBestChannelMatch(name, candidates);
+                _logger.LogInformation(
+                    "YouTube channel search for {Name}: {Count} hit(s), picked {Picked}",
+                    name,
+                    candidates.Count,
+                    best == null ? "none" : $"{best.Snippet?.Title} ({best.Id?.ChannelId})");
+                var bestId = best?.Id?.ChannelId;
                 if (!string.IsNullOrEmpty(bestId))
                 {
                     channel = await GetChannelAsync(bestId, cancellationToken).ConfigureAwait(false);
@@ -97,6 +108,7 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.YouTube
 
             if (channel == null || string.IsNullOrEmpty(channel.Id))
             {
+                _logger.LogWarning("Could not resolve a YouTube channel for {Name}", name);
                 return null;
             }
 
@@ -153,6 +165,7 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.YouTube
                 await _cache.SaveChannelAsync(channel.Id, channel, cancellationToken).ConfigureAwait(false);
             }
 
+            _logger.LogInformation("YouTube channel search for {Query}: {Hits} hit(s), {Returned} returned", query, hits.Count, results.Count);
             return Utils.OrderChannelsByMatch(query, results).Take(maxResults).ToList();
         }
 
@@ -171,6 +184,7 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.YouTube
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
 
+            _logger.LogInformation("YouTube video search for {Query} in channel {ChannelId}: {Hits} hit(s)", query, channelId ?? "(any)", ids.Count);
             if (ids.Count == 0)
             {
                 return Array.Empty<Video>();

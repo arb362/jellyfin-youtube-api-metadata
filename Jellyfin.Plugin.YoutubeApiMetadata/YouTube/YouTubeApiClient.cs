@@ -20,19 +20,30 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.YouTube
         private const string ChannelParts = "snippet,brandingSettings,statistics,topicDetails,contentDetails,status";
         private const string SearchParts = "snippet";
 
-        private readonly string _apiKey;
+        private readonly Func<string> _getApiKey;
         private readonly IHttpClientFactory? _httpClientFactory;
+        private readonly object _serviceLock = new();
         private YouTubeService? _service;
+        private string? _serviceApiKey;
 
-        public YouTubeApiClient(string apiKey, IHttpClientFactory? httpClientFactory = null)
+        /// <summary>
+        /// Creates a client that reads the API key through <paramref name="getApiKey"/> on every
+        /// call. Jellyfin constructs providers (and therefore this client) once at server startup,
+        /// typically before the admin has entered a key; reading the key lazily means a key saved
+        /// (or changed) in the settings page takes effect immediately, without a restart.
+        /// </summary>
+        public YouTubeApiClient(Func<string> getApiKey, IHttpClientFactory? httpClientFactory = null)
         {
-            // Jellyfin constructs providers (and therefore this client) once at server startup to
-            // register them, regardless of whether the plugin has been configured yet. Validating
-            // the API key here would make every provider silently fail to register on a fresh
-            // install, until the next restart. So the key is only required lazily, on first actual
-            // API call - which only happens during a real metadata fetch.
-            _apiKey = apiKey;
+            _getApiKey = getApiKey;
             _httpClientFactory = httpClientFactory;
+        }
+
+        /// <summary>
+        /// Creates a client with a fixed API key (tests and one-off use).
+        /// </summary>
+        public YouTubeApiClient(string apiKey, IHttpClientFactory? httpClientFactory = null)
+            : this(() => apiKey, httpClientFactory)
+        {
         }
 
         public async Task<Video?> GetVideoAsync(string videoId, CancellationToken cancellationToken)
@@ -128,7 +139,11 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.YouTube
 
         public void Dispose()
         {
-            _service?.Dispose();
+            lock (_serviceLock)
+            {
+                _service?.Dispose();
+                _service = null;
+            }
         }
 
         /// <summary>
@@ -151,30 +166,39 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.YouTube
 
         private YouTubeService GetService()
         {
-            if (_service != null)
-            {
-                return _service;
-            }
-
-            if (string.IsNullOrWhiteSpace(_apiKey))
+            var apiKey = (_getApiKey() ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(apiKey))
             {
                 throw new InvalidOperationException(
-                    "No YouTube Data API v3 key configured. Set one in the plugin's settings page, then retry the scan.");
+                    "No YouTube Data API v3 key configured. Set one in Dashboard > Plugins > YouTube API Metadata, save, then retry.");
             }
 
-            var initializer = new BaseClientService.Initializer
+            lock (_serviceLock)
             {
-                ApiKey = _apiKey,
-                ApplicationName = Constants.PluginName
-            };
+                // Rebuild the service whenever the configured key changes (first use, or the admin
+                // pasted a new key), so the change applies without restarting Jellyfin.
+                if (_service != null && string.Equals(_serviceApiKey, apiKey, StringComparison.Ordinal))
+                {
+                    return _service;
+                }
 
-            if (_httpClientFactory != null)
-            {
-                initializer.HttpClientFactory = _httpClientFactory;
+                _service?.Dispose();
+
+                var initializer = new BaseClientService.Initializer
+                {
+                    ApiKey = apiKey,
+                    ApplicationName = Constants.PluginName
+                };
+
+                if (_httpClientFactory != null)
+                {
+                    initializer.HttpClientFactory = _httpClientFactory;
+                }
+
+                _service = new YouTubeService(initializer);
+                _serviceApiKey = apiKey;
+                return _service;
             }
-
-            _service = new YouTubeService(initializer);
-            return _service;
         }
     }
 }
