@@ -1,7 +1,7 @@
 ---
 name: "YouTube API Metadata"
 guid: "338cccea-4c27-474e-8934-4c7c3737d034"
-version: "0.3.1.0"
+version: "0.3.2.0"
 targetAbi: "12.0.0"
 framework: "net10.0"
 owner: "314"
@@ -18,9 +18,8 @@ artifacts:
 - "System.CodeDom.dll"
 - "System.Management.dll"
 changelog: >
-  Fix: the API key is now read on every call, so a key saved in the settings page works
-  immediately instead of only after a restart (0.3.0.0 and earlier always used the key present at
-  startup - empty on a fresh install - and every lookup failed with "No YouTube Data API v3 key
-  configured"). Lookups are now logged (handle/name searches, hit counts, picked channel).
-  Includes 0.3.0.0: channel-name and @handle search for series folders, title search for video
-  files, full channel/video metadata (keywords, topics, country, banner images).
+  Fix: Identify returned no results when a handle or name was typed into the "YouTube" ID field
+  (it was sent to the API as a channel ID, which silently matched nothing). Both Identify fields
+  now accept a channel ID, an @handle, a channel name, or a pasted YouTube URL; videos accept a
+  video ID or any video URL. A handle or name saved in a series' YouTube external ID is resolved
+  and replaced with the real channel ID on the next refresh.

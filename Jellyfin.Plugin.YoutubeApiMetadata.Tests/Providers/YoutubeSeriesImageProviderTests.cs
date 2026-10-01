@@ -105,6 +105,22 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests.Providers
         }
 
         [Fact]
+        public async Task GetImages_ResolvesHandleStoredInIdField()
+        {
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            resolver.Setup(r => r.FindChannelByNameAsync("@rickastley", It.IsAny<CancellationToken>())).ReturnsAsync(ChannelWithBanner);
+
+            var provider = new YoutubeSeriesImageProvider(resolver.Object, Config(nameSearch: false));
+            var item = new Series
+            {
+                Path = "/media/Some Folder",
+                ProviderIds = new Dictionary<string, string> { { Constants.PluginName, "@rickastley" } }
+            };
+
+            Assert.Equal(3, (await provider.GetImages(item, CancellationToken.None)).Count());
+        }
+
+        [Fact]
         public void SupportsPrimaryBackdropAndBanner()
         {
             var provider = new YoutubeSeriesImageProvider(Mock.Of<IYoutubeMetadataResolver>(), Config());

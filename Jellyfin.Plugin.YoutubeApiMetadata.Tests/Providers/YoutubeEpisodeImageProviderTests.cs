@@ -72,6 +72,21 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests.Providers
         }
 
         [Fact]
+        public async Task GetImages_IgnoresStoredValueThatIsNotAVideoId()
+        {
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            var provider = new YoutubeEpisodeImageProvider(resolver.Object);
+            var item = new Episode
+            {
+                Path = "/media/Rick Astley/no id here.mkv",
+                ProviderIds = new Dictionary<string, string> { { Constants.PluginName, "not a video id" } }
+            };
+
+            Assert.Empty(await provider.GetImages(item, CancellationToken.None));
+            resolver.VerifyNoOtherCalls();
+        }
+
+        [Fact]
         public void Supports_OnlyEpisodes()
         {
             var provider = new YoutubeEpisodeImageProvider(Mock.Of<IYoutubeMetadataResolver>());

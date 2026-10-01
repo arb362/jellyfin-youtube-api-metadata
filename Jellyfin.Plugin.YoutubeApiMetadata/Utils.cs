@@ -38,6 +38,16 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
             Constants.YTHANDLE_RE,
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+        // Channel IDs are "UC" + 22 URL-safe base64 chars. The "UC" anchor matters for free text:
+        // without it any 24-letter channel name with no spaces would be mistaken for an ID.
+        private static readonly Regex ChannelIdRegex = new(
+            @"^UC[a-zA-Z0-9\-_]{22}$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static readonly Regex VideoIdRegex = new(
+            @"^[a-zA-Z0-9\-_]{11}$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
         private static readonly Regex TrailingParentheticalRegex = new(
             @"\s*\([^)]*\)\s*$",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -158,14 +168,145 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
         }
 
         /// <summary>
+        /// Interprets free text a user may put where a channel is expected (the "YouTube" external
+        /// ID field, the Identify name box, a pasted link) as one of: a channel ID, a handle, or a
+        /// name to search for. Accepts bare values and every common channel URL form:
+        /// youtube.com/channel/UC…, youtube.com/@handle, youtube.com/c/Name, youtube.com/user/Name.
+        /// </summary>
+        public static ChannelReference ParseChannelReference(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return ChannelReference.None;
+            }
+
+            var value = text.Trim();
+
+            var urlPath = GetYouTubeUrlPath(value);
+            if (urlPath != null)
+            {
+                var segments = urlPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                if (segments.Length == 0)
+                {
+                    return ChannelReference.None;
+                }
+
+                var first = Uri.UnescapeDataString(segments[0]);
+                if (first.StartsWith('@'))
+                {
+                    return new ChannelReference(ChannelReferenceKind.Handle, first);
+                }
+
+                if (segments.Length >= 2)
+                {
+                    var second = Uri.UnescapeDataString(segments[1]);
+                    if (first.Equals("channel", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return ChannelIdRegex.IsMatch(second)
+                            ? new ChannelReference(ChannelReferenceKind.Id, second)
+                            : ChannelReference.None;
+                    }
+
+                    if (first.Equals("c", StringComparison.OrdinalIgnoreCase) || first.Equals("user", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return new ChannelReference(ChannelReferenceKind.Name, second);
+                    }
+                }
+
+                return ChannelReference.None;
+            }
+
+            if (ChannelIdRegex.IsMatch(value))
+            {
+                return new ChannelReference(ChannelReferenceKind.Id, value);
+            }
+
+            return IsHandle(value)
+                ? new ChannelReference(ChannelReferenceKind.Handle, value)
+                : new ChannelReference(ChannelReferenceKind.Name, value);
+        }
+
+        /// <summary>
+        /// Extracts a video ID from free text a user may put where a video is expected: a bare
+        /// 11-char ID or any common video URL (watch?v=, youtu.be/, /shorts/, /embed/, /live/).
+        /// Returns null when the text is neither.
+        /// </summary>
+        public static string? ParseVideoReference(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return null;
+            }
+
+            var value = text.Trim();
+            if (VideoIdRegex.IsMatch(value))
+            {
+                return value;
+            }
+
+            if (!Uri.TryCreate(value.Contains("://", StringComparison.Ordinal) ? value : "https://" + value, UriKind.Absolute, out var uri))
+            {
+                return null;
+            }
+
+            var host = uri.Host.ToLowerInvariant();
+            var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            string? candidate = null;
+
+            if (host == "youtu.be" || host.EndsWith(".youtu.be", StringComparison.Ordinal))
+            {
+                candidate = segments.FirstOrDefault();
+            }
+            else if (host == "youtube.com" || host.EndsWith(".youtube.com", StringComparison.Ordinal)
+                || host == "youtube-nocookie.com" || host.EndsWith(".youtube-nocookie.com", StringComparison.Ordinal))
+            {
+                if (segments.Length >= 1 && segments[0].Equals("watch", StringComparison.OrdinalIgnoreCase))
+                {
+                    candidate = uri.Query.TrimStart('?')
+                        .Split('&', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(p => p.Split('=', 2))
+                        .Where(kv => kv.Length == 2 && kv[0] == "v")
+                        .Select(kv => Uri.UnescapeDataString(kv[1]))
+                        .FirstOrDefault();
+                }
+                else if (segments.Length >= 2
+                    && (segments[0].Equals("shorts", StringComparison.OrdinalIgnoreCase)
+                        || segments[0].Equals("embed", StringComparison.OrdinalIgnoreCase)
+                        || segments[0].Equals("live", StringComparison.OrdinalIgnoreCase)
+                        || segments[0].Equals("v", StringComparison.OrdinalIgnoreCase)))
+                {
+                    candidate = segments[1];
+                }
+            }
+
+            return candidate != null && VideoIdRegex.IsMatch(candidate) ? candidate : null;
+        }
+
+        /// <summary>
+        /// The raw value stored under this plugin's provider key (what the user typed in the
+        /// "YouTube" external ID field, or what a previous match saved), or null.
+        /// </summary>
+        public static string? GetStoredProviderValue(IReadOnlyDictionary<string, string>? providerIds)
+        {
+            return providerIds != null
+                && providerIds.TryGetValue(Constants.PluginName, out var value)
+                && !string.IsNullOrWhiteSpace(value)
+                ? value.Trim()
+                : null;
+        }
+
+        /// <summary>
         /// Resolves a channel ID from (in order): an already-stored provider ID, the folder name
         /// convention "[channelId]", or (last resort) a bracketed ID in the series display name.
+        /// A stored value that is not actually a channel ID (a handle or name typed into the ID
+        /// field) is ignored here; see <see cref="ParseChannelReference"/> for those.
         /// </summary>
         public static string? ResolveChannelId(IReadOnlyDictionary<string, string>? providerIds, string? path, string? name)
         {
-            if (providerIds != null && providerIds.TryGetValue(Constants.PluginName, out var id) && !string.IsNullOrEmpty(id))
+            var stored = ParseChannelReference(GetStoredProviderValue(providerIds));
+            if (stored.Kind == ChannelReferenceKind.Id)
             {
-                return id;
+                return stored.Value;
             }
 
             var fromPath = GetChannelId(GetLastPathSegment(path ?? string.Empty));
@@ -604,6 +745,28 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
             return rank + 1;
         }
 
+        /// <summary>
+        /// The path of a youtube.com URL (scheme optional), or null if the text is not one.
+        /// </summary>
+        private static string? GetYouTubeUrlPath(string value)
+        {
+            if (value.Contains(' ') || !value.Contains("youtube.com", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var candidate = value.Contains("://", StringComparison.Ordinal) ? value : "https://" + value;
+            if (!Uri.TryCreate(candidate, UriKind.Absolute, out var uri))
+            {
+                return null;
+            }
+
+            var host = uri.Host.ToLowerInvariant();
+            return host == "youtube.com" || host.EndsWith(".youtube.com", StringComparison.Ordinal)
+                ? uri.AbsolutePath
+                : null;
+        }
+
         private static bool IsExactChannelMatch(string normalizedQuery, Channel channel)
         {
             if (normalizedQuery.Length == 0)
@@ -614,5 +777,31 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata
             return NormalizeName(channel.Snippet?.Title) == normalizedQuery
                 || NormalizeName(channel.Snippet?.CustomUrl) == normalizedQuery;
         }
+    }
+
+    /// <summary>
+    /// What a piece of user-supplied text identifying a channel turned out to be.
+    /// </summary>
+    public enum ChannelReferenceKind
+    {
+        /// <summary>Nothing usable.</summary>
+        None,
+
+        /// <summary>A channel ID ("UC…", 24 chars): fetch directly.</summary>
+        Id,
+
+        /// <summary>A handle ("@name"): exact 1-unit lookup.</summary>
+        Handle,
+
+        /// <summary>Anything else: a name to search for.</summary>
+        Name
+    }
+
+    /// <summary>
+    /// A parsed channel reference: its kind and the cleaned-up value (ID, "@handle", or name).
+    /// </summary>
+    public readonly record struct ChannelReference(ChannelReferenceKind Kind, string Value)
+    {
+        public static readonly ChannelReference None = new(ChannelReferenceKind.None, string.Empty);
     }
 }

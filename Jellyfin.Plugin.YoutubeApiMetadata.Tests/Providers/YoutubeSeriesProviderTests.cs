@@ -178,6 +178,104 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests.Providers
             Assert.Equal(Constants.PluginName, single.SearchProviderName);
         }
 
+        [Theory]
+        [InlineData("@FaithvilleProductions", "@FaithvilleProductions")]
+        [InlineData("https://www.youtube.com/@FaithvilleProductions", "@FaithvilleProductions")]
+        [InlineData("Faithville Productions", "Faithville Productions")]
+        public async Task GetSearchResults_SearchesHandleOrNameTypedIntoTheIdField(string typed, string expectedQuery)
+        {
+            // Regression: the Identify dialog's "YouTube" field arrives in ProviderIds. A handle
+            // typed there used to be sent to the API as a channel ID, which found nothing and
+            // raised no error - an empty result list with a clean log.
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            resolver.Setup(r => r.SearchChannelsAsync(expectedQuery, 10, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<Channel> { SampleChannel });
+
+            var provider = new YoutubeSeriesProvider(resolver.Object, Config());
+            var searchInfo = new SeriesInfo { ProviderIds = new Dictionary<string, string> { { Constants.PluginName, typed } } };
+
+            var results = (await provider.GetSearchResults(searchInfo, CancellationToken.None)).ToList();
+
+            Assert.Equal(ChannelId, Assert.Single(results).ProviderIds[Constants.PluginName]);
+            resolver.Verify(r => r.GetChannelAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Theory]
+        [InlineData("https://www.youtube.com/channel/" + ChannelId)]
+        [InlineData(ChannelId)]
+        public async Task GetSearchResults_FetchesChannelDirectly_WhenIdOrChannelUrlTypedIntoNameBox(string typed)
+        {
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            resolver.Setup(r => r.GetChannelAsync(ChannelId, It.IsAny<CancellationToken>())).ReturnsAsync(SampleChannel);
+
+            var provider = new YoutubeSeriesProvider(resolver.Object, Config());
+
+            var results = (await provider.GetSearchResults(new SeriesInfo { Name = typed }, CancellationToken.None)).ToList();
+
+            Assert.Single(results);
+        }
+
+        [Fact]
+        public async Task GetSearchResults_ListsIdMatchFirst_ThenNameSearch_WithoutDuplicates()
+        {
+            var other = new Channel { Id = "UCzzzzzzzzzzzzzzzzzzzzzz", Snippet = new ChannelSnippet { Title = "Rick Astley Fan Club" } };
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            resolver.Setup(r => r.GetChannelAsync(ChannelId, It.IsAny<CancellationToken>())).ReturnsAsync(SampleChannel);
+            resolver.Setup(r => r.SearchChannelsAsync("Rick Astley", 10, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<Channel> { other, SampleChannel });
+
+            var provider = new YoutubeSeriesProvider(resolver.Object, Config());
+            var searchInfo = new SeriesInfo
+            {
+                Name = "Rick Astley",
+                ProviderIds = new Dictionary<string, string> { { Constants.PluginName, ChannelId } }
+            };
+
+            var results = (await provider.GetSearchResults(searchInfo, CancellationToken.None)).ToList();
+
+            Assert.Equal(new[] { ChannelId, "UCzzzzzzzzzzzzzzzzzzzzzz" }, results.Select(r => r.ProviderIds[Constants.PluginName]));
+        }
+
+        [Fact]
+        public async Task GetSearchResults_FallsBackToTypedName_WhenTypedIdDoesNotExist()
+        {
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            resolver.Setup(r => r.GetChannelAsync("UCdoesnotexist000000000a", It.IsAny<CancellationToken>())).ReturnsAsync((Channel?)null);
+            resolver.Setup(r => r.SearchChannelsAsync("Rick Astley", 10, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<Channel> { SampleChannel });
+
+            var provider = new YoutubeSeriesProvider(resolver.Object, Config());
+            var searchInfo = new SeriesInfo
+            {
+                Name = "Rick Astley",
+                ProviderIds = new Dictionary<string, string> { { Constants.PluginName, "UCdoesnotexist000000000a" } }
+            };
+
+            Assert.Single(await provider.GetSearchResults(searchInfo, CancellationToken.None));
+        }
+
+        [Fact]
+        public async Task GetMetadata_ResolvesHandleStoredInIdField_EvenWithNameSearchDisabled()
+        {
+            // Typing a handle into the series' "YouTube" external ID field in the metadata editor
+            // is explicit user input: honour it regardless of the automatic folder-name setting,
+            // and hand back the real channel ID so it replaces the handle on the item.
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            resolver.Setup(r => r.FindChannelByNameAsync("@FaithvilleProductions", It.IsAny<CancellationToken>())).ReturnsAsync(SampleChannel);
+
+            var provider = new YoutubeSeriesProvider(resolver.Object, Config(nameSearch: false));
+            var info = new SeriesInfo
+            {
+                Path = "/media/channels/Some Folder",
+                ProviderIds = new Dictionary<string, string> { { Constants.PluginName, "@FaithvilleProductions" } }
+            };
+
+            var result = await provider.GetMetadata(info, CancellationToken.None);
+
+            Assert.True(result.HasMetadata);
+            Assert.Equal(ChannelId, result.Item.ProviderIds[Constants.PluginName]);
+        }
+
         [Fact]
         public async Task GetSearchResults_UsesConfiguredResultLimit()
         {

@@ -76,26 +76,15 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Providers
             return Plugin.Instance.GetHttpClient().GetAsync(url, cancellationToken);
         }
 
-        private async Task<Channel?> ResolveChannelAsync(BaseItem item, CancellationToken cancellationToken)
+        private Task<Channel?> ResolveChannelAsync(BaseItem item, CancellationToken cancellationToken)
         {
-            var channelId = Utils.ResolveChannelId(item.ProviderIds, item.Path, item.Name);
-            if (!string.IsNullOrEmpty(channelId))
-            {
-                return await _resolver.GetChannelAsync(channelId, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (!_getConfiguration().EnableChannelNameSearch)
-            {
-                return null;
-            }
-
-            var name = Utils.GetChannelNameFromPath(item.Path) ?? item.Name;
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                return null;
-            }
-
-            return await _resolver.FindChannelByNameAsync(name, cancellationToken).ConfigureAwait(false);
+            return ChannelLookup.ResolveAsync(
+                _resolver,
+                item.ProviderIds,
+                item.Path,
+                item.Name,
+                _getConfiguration().EnableChannelNameSearch,
+                cancellationToken);
         }
     }
 }

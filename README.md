@@ -43,6 +43,8 @@ The plugin locates a channel or video by, in order:
 3. **The channel name or handle** — a folder named `Rick Astley` or `@RickAstleyYT` is looked up on YouTube. A handle is an exact lookup (1 quota unit). A plain name is a search (100 quota units): the plugin takes an exact title match if one is in the top hits, otherwise YouTube's top hit. Either way the result is cached on disk and stored on the item, so the search is paid **once per folder**.
 4. **The video title** — a file with no `[videoId]` is searched for *within its channel* (100 quota units, once per file). To avoid stamping the wrong metadata on a file, a match is only accepted if the title is an exact match (ignoring case and punctuation), or the top hit was uploaded on the date in the file name (`20091025 - Title.mkv`). Files in a folder whose channel could not be determined are left alone.
 
+In the **Identify** dialog you can type into either field. Both the "YouTube" ID field and the Name box accept a channel ID (`UC…`), a handle (`@RickAstleyYT`), a channel name, or a pasted channel URL; for episodes, a video ID or any video URL (`watch?v=`, `youtu.be/`, `/shorts/`). The same goes for the YouTube external ID in the metadata editor: save a handle or URL there and the next refresh replaces it with the real channel ID.
+
 Steps 3 and 4 can be switched off in the plugin settings. The manual **Identify** dialog uses the same searches (channel name/handle for a series, title within the channel for an episode) and shows full details — description, year, avatar/thumbnail — for every candidate.
 
 ### Quota

@@ -38,9 +38,8 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Providers
 
         public async Task<IEnumerable<RemoteImageInfo>> GetImages(BaseItem item, CancellationToken cancellationToken)
         {
-            var videoId = item.ProviderIds.TryGetValue(Constants.PluginName, out var stored) && !string.IsNullOrEmpty(stored)
-                ? stored
-                : Utils.GetVideoId(Utils.GetLastPathSegment(item.Path ?? string.Empty));
+            var videoId = Utils.ParseVideoReference(Utils.GetStoredProviderValue(item.ProviderIds))
+                ?? Utils.GetVideoId(Utils.GetLastPathSegment(item.Path ?? string.Empty));
 
             if (string.IsNullOrEmpty(videoId))
             {

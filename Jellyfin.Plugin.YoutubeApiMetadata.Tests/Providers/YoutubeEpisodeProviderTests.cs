@@ -359,6 +359,86 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests.Providers
             Assert.Single(results);
         }
 
+        [Theory]
+        [InlineData("https://www.youtube.com/watch?v=dQw4w9WgXcQ")]
+        [InlineData("https://youtu.be/dQw4w9WgXcQ")]
+        public async Task GetSearchResults_AcceptsVideoUrl_InIdFieldOrNameBox(string url)
+        {
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            resolver.Setup(r => r.GetVideoAsync("dQw4w9WgXcQ", It.IsAny<CancellationToken>())).ReturnsAsync(SampleVideo);
+            var provider = CreateProvider(resolver);
+
+            var viaIdField = await provider.GetSearchResults(
+                new EpisodeInfo { ProviderIds = new Dictionary<string, string> { { Constants.PluginName, url } } },
+                CancellationToken.None);
+            var viaNameBox = await provider.GetSearchResults(new EpisodeInfo { Name = url }, CancellationToken.None);
+
+            Assert.Single(viaIdField);
+            Assert.Single(viaNameBox);
+        }
+
+        [Fact]
+        public async Task GetSearchResults_IgnoresJunkInIdField_AndSearchesTypedName()
+        {
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            resolver.Setup(r => r.SearchVideosAsync("never gonna", ChannelId, 10, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<Video> { SampleVideo });
+
+            var provider = CreateProvider(resolver);
+            var info = new EpisodeInfo
+            {
+                Name = "never gonna",
+                ProviderIds = new Dictionary<string, string> { { Constants.PluginName, "@FaithvilleProductions" } },
+                SeriesProviderIds = new Dictionary<string, string> { { Constants.PluginName, ChannelId } }
+            };
+
+            Assert.Single(await provider.GetSearchResults(info, CancellationToken.None));
+            resolver.Verify(r => r.GetVideoAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task GetSearchResults_ListsIdMatchFirst_ThenTypedNameSearch()
+        {
+            var live = new Video { Id = "liveVid1111", Snippet = new VideoSnippet { Title = "Never Gonna Give You Up (Live)" } };
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            resolver.Setup(r => r.GetVideoAsync("dQw4w9WgXcQ", It.IsAny<CancellationToken>())).ReturnsAsync(SampleVideo);
+            resolver.Setup(r => r.SearchVideosAsync("never gonna", ChannelId, 10, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new List<Video> { live, SampleVideo });
+
+            var provider = CreateProvider(resolver);
+            var info = new EpisodeInfo
+            {
+                Name = "never gonna",
+                ProviderIds = new Dictionary<string, string> { { Constants.PluginName, "dQw4w9WgXcQ" } },
+                SeriesProviderIds = new Dictionary<string, string> { { Constants.PluginName, ChannelId } }
+            };
+
+            var results = (await provider.GetSearchResults(info, CancellationToken.None)).ToList();
+
+            Assert.Equal(new[] { "dQw4w9WgXcQ", "liveVid1111" }, results.Select(r => r.ProviderIds[Constants.PluginName]));
+        }
+
+        [Fact]
+        public async Task GetMetadata_ScopesTitleSearch_ToHandleStoredOnSeries()
+        {
+            // The series still carries the handle the user typed (not yet refreshed into an ID).
+            var channel = new Channel { Id = ChannelId, Snippet = new ChannelSnippet { Title = "Rick Astley" } };
+            var resolver = new Mock<IYoutubeMetadataResolver>(MockBehavior.Strict);
+            resolver.Setup(r => r.FindChannelByNameAsync("@rickastley", It.IsAny<CancellationToken>())).ReturnsAsync(channel);
+            resolver
+                .Setup(r => r.FindVideoByTitleAsync("Never Gonna Give You Up", ChannelId, null, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(SampleVideo);
+
+            var provider = CreateProvider(resolver, Config(nameSearch: false));
+            var info = new EpisodeInfo
+            {
+                Path = "/media/Some Folder/Never Gonna Give You Up.mkv",
+                SeriesProviderIds = new Dictionary<string, string> { { Constants.PluginName, "@rickastley" } }
+            };
+
+            Assert.True((await provider.GetMetadata(info, CancellationToken.None)).HasMetadata);
+        }
+
         [Fact]
         public async Task GetSearchResults_ReturnsEmpty_WhenNothingToSearchFor()
         {

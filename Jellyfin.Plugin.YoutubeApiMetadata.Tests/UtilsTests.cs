@@ -59,6 +59,68 @@ namespace Jellyfin.Plugin.YoutubeApiMetadata.Tests
         }
 
         [Theory]
+        [InlineData("UCuAXFkgsw1L7xaCfnd5JJOw", ChannelReferenceKind.Id, "UCuAXFkgsw1L7xaCfnd5JJOw")]
+        [InlineData("  UCuAXFkgsw1L7xaCfnd5JJOw ", ChannelReferenceKind.Id, "UCuAXFkgsw1L7xaCfnd5JJOw")]
+        [InlineData("@FaithvilleProductions", ChannelReferenceKind.Handle, "@FaithvilleProductions")]
+        [InlineData("Faithville Productions", ChannelReferenceKind.Name, "Faithville Productions")]
+        [InlineData("FaithvilleProductions", ChannelReferenceKind.Name, "FaithvilleProductions")]
+        [InlineData("ABCDEFGHIJKLMNOPQRSTUVWX", ChannelReferenceKind.Name, "ABCDEFGHIJKLMNOPQRSTUVWX")]
+        [InlineData("https://www.youtube.com/channel/UCuAXFkgsw1L7xaCfnd5JJOw", ChannelReferenceKind.Id, "UCuAXFkgsw1L7xaCfnd5JJOw")]
+        [InlineData("https://www.youtube.com/channel/UCuAXFkgsw1L7xaCfnd5JJOw/videos?view=0", ChannelReferenceKind.Id, "UCuAXFkgsw1L7xaCfnd5JJOw")]
+        [InlineData("https://www.youtube.com/@FaithvilleProductions", ChannelReferenceKind.Handle, "@FaithvilleProductions")]
+        [InlineData("youtube.com/@FaithvilleProductions/videos", ChannelReferenceKind.Handle, "@FaithvilleProductions")]
+        [InlineData("https://m.youtube.com/@FaithvilleProductions?si=abc", ChannelReferenceKind.Handle, "@FaithvilleProductions")]
+        [InlineData("https://www.youtube.com/c/RickAstley", ChannelReferenceKind.Name, "RickAstley")]
+        [InlineData("https://www.youtube.com/user/RickAstleyVEVO", ChannelReferenceKind.Name, "RickAstleyVEVO")]
+        [InlineData("https://www.youtube.com/watch?v=dQw4w9WgXcQ", ChannelReferenceKind.None, "")]
+        [InlineData("https://www.youtube.com/channel/not-an-id", ChannelReferenceKind.None, "")]
+        [InlineData("https://www.youtube.com/", ChannelReferenceKind.None, "")]
+        [InlineData("", ChannelReferenceKind.None, "")]
+        [InlineData("   ", ChannelReferenceKind.None, "")]
+        [InlineData(null, ChannelReferenceKind.None, "")]
+        public void ParseChannelReference(string? text, ChannelReferenceKind kind, string value)
+        {
+            var reference = Utils.ParseChannelReference(text);
+
+            Assert.Equal(kind, reference.Kind);
+            Assert.Equal(value, reference.Value);
+        }
+
+        [Theory]
+        [InlineData("dQw4w9WgXcQ", "dQw4w9WgXcQ")]
+        [InlineData(" dQw4w9WgXcQ ", "dQw4w9WgXcQ")]
+        [InlineData("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ")]
+        [InlineData("https://www.youtube.com/watch?list=PL123&v=dQw4w9WgXcQ&t=42s", "dQw4w9WgXcQ")]
+        [InlineData("https://youtu.be/dQw4w9WgXcQ?si=abc", "dQw4w9WgXcQ")]
+        [InlineData("youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ")]
+        [InlineData("https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ")]
+        [InlineData("https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ")]
+        [InlineData("https://www.youtube.com/live/dQw4w9WgXcQ", "dQw4w9WgXcQ")]
+        [InlineData("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ")]
+        [InlineData("https://www.youtube.com/@FaithvilleProductions", null)]
+        [InlineData("https://example.com/watch?v=dQw4w9WgXcQ", null)]
+        [InlineData("@FaithvilleProductions", null)]
+        [InlineData("Never Gonna Give You Up", null)]
+        [InlineData("UCuAXFkgsw1L7xaCfnd5JJOw", null)]
+        [InlineData("", null)]
+        [InlineData(null, null)]
+        public void ParseVideoReference(string? text, string? expected)
+        {
+            Assert.Equal(expected, Utils.ParseVideoReference(text));
+        }
+
+        [Fact]
+        public void ResolveChannelId_IgnoresStoredValueThatIsNotAChannelId()
+        {
+            // A handle typed into the "YouTube" ID field must never be sent to the API as an ID.
+            var handle = new Dictionary<string, string> { { Constants.PluginName, "@FaithvilleProductions" } };
+            var url = new Dictionary<string, string> { { Constants.PluginName, "https://www.youtube.com/channel/UCuAXFkgsw1L7xaCfnd5JJOw" } };
+
+            Assert.Null(Utils.ResolveChannelId(handle, "/media/Faithville", null));
+            Assert.Equal("UCuAXFkgsw1L7xaCfnd5JJOw", Utils.ResolveChannelId(url, "/media/Faithville", null));
+        }
+
+        [Theory]
         [InlineData("@rickastley", true)]
         [InlineData("@Rick.Astley_YT-1", true)]
         [InlineData("  @rickastley  ", true)]
